@@ -32,5 +32,8 @@ declare const __EXTENSION_URL__: string;
   );
 
   initConnection(connection, bridge);
+
+  // self.postMessage({ method: "serverWorkerReady" });
+
   connection.sendNotification("serverWorkerReady");
 })();

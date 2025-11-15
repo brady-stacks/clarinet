@@ -8,6 +8,8 @@ use clarinet_deployments::{
 };
 use clarinet_files::{FileAccessor, FileLocation, ProjectManifest, StacksNetwork};
 use clarity::vm::ast::build_ast;
+use clarity::vm::costs::analysis::CostAnalysisNode;
+use clarity::vm::costs::ExecutionCost;
 use clarity_repl::analysis::ast_dependency_detector::DependencySet;
 use clarity_repl::clarity::analysis::ContractAnalysis;
 use clarity_repl::clarity::diagnostic::{Diagnostic as ClarityDiagnostic, Level as ClarityLevel};
@@ -15,6 +17,7 @@ use clarity_repl::clarity::vm::ast::ContractAST;
 use clarity_repl::clarity::vm::types::{QualifiedContractIdentifier, StandardPrincipalData};
 use clarity_repl::clarity::vm::EvaluationResult;
 use clarity_repl::clarity::{ClarityName, ClarityVersion, StacksEpochId, SymbolicExpression};
+use clarity_repl::repl::interpreter::BLOCK_LIMIT_MAINNET;
 use clarity_repl::repl::{ContractDeployer, DEFAULT_CLARITY_VERSION};
 use lsp_types::{
     CompletionItem, DocumentSymbol, Hover, Location, MessageType, Position, Range, SignatureHelp,
@@ -128,7 +131,7 @@ impl ActiveContractData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ContractState {
     contract_calls: Vec<CompletionItem>,
     errors: Vec<ClarityDiagnostic>,
@@ -139,6 +142,8 @@ pub struct ContractState {
     definitions: HashMap<ClarityName, Range>,
     location: FileLocation,
     clarity_version: ClarityVersion,
+    cost_analysis:
+        Option<std::collections::HashMap<String, clarity::vm::costs::analysis::CostAnalysisNode>>,
 }
 
 impl ContractState {
@@ -151,6 +156,9 @@ impl ContractState {
         definitions: HashMap<ClarityName, Range>,
         location: FileLocation,
         clarity_version: ClarityVersion,
+        cost_analysis: Option<
+            std::collections::HashMap<String, clarity::vm::costs::analysis::CostAnalysisNode>,
+        >,
     ) -> ContractState {
         let mut errors = vec![];
         let mut warnings = vec![];
@@ -185,7 +193,39 @@ impl ContractState {
             definitions,
             location,
             clarity_version,
+            cost_analysis,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CostPercents {
+    pub runtime: f64,
+    pub write_length: f64,
+    pub write_count: f64,
+    pub read_length: f64,
+    pub read_count: f64,
+}
+
+fn u64_to_f64(value: u64) -> f64 {
+    // XXX Not sure if there's a safer conversion
+    value as f64
+}
+
+fn get_cost_percents(cost: &ExecutionCost, block_limits: &ExecutionCost) -> CostPercents {
+    let runtime = (u64_to_f64(cost.runtime) / u64_to_f64(block_limits.runtime)) * 100.0;
+    let write_length =
+        (u64_to_f64(cost.write_length) / u64_to_f64(block_limits.write_length)) * 100.0;
+    let write_count = (u64_to_f64(cost.write_count) / u64_to_f64(block_limits.write_count)) * 100.0;
+    let read_length = (u64_to_f64(cost.read_length) / u64_to_f64(block_limits.read_length)) * 100.0;
+    let read_count = (u64_to_f64(cost.read_count) / u64_to_f64(block_limits.read_count)) * 100.0;
+
+    CostPercents {
+        runtime,
+        write_length,
+        write_count,
+        read_length,
+        read_count,
     }
 }
 
@@ -432,13 +472,128 @@ impl EditorState {
         let documentation =
             get_expression_documentation(&position, contract.expressions.as_ref()?)?;
 
+        // Try to get cost analysis for this position
+        let cost_info = self.get_function_cost_info_for_hover(contract_location, position);
+
+        let mut hover_content = documentation;
+        if let Some(cost_text) = cost_info {
+            hover_content.push_str("\n\n---\n\n");
+            hover_content.push_str(&cost_text);
+        }
+
         Some(Hover {
             contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
                 kind: lsp_types::MarkupKind::Markdown,
-                value: documentation,
+                value: hover_content,
             }),
             range: None,
         })
+    }
+
+    fn get_function_cost_info_for_hover(
+        &self,
+        contract_location: &FileLocation,
+        position: Position,
+    ) -> Option<String> {
+        let contract_metadata = self.contracts_lookup.get(contract_location)?;
+
+        let protocol_state = self.protocols.get(&contract_metadata.manifest_location)?;
+        let contract_state = protocol_state.contracts.get(contract_location)?;
+        let cost_analysis = contract_state.cost_analysis.as_ref()?;
+
+        // Find which function the position is in
+        let mut function_name = None;
+        for (name, range) in &contract_state.definitions {
+            if position.line >= range.start.line
+                && position.line <= range.end.line
+                && position.character >= range.start.character
+                && position.character <= range.end.character
+            {
+                function_name = Some(name.to_string());
+                break;
+            }
+        }
+
+        let function_name = function_name?;
+
+        // Look up the cost analysis for this function
+        let cost_node = cost_analysis.get(&function_name)?;
+
+        Some(Self::format_cost_for_codelens(cost_node))
+    }
+
+    pub fn get_code_lenses(&self, contract_location: &FileLocation) -> Vec<lsp_types::CodeLens> {
+        let mut code_lenses = Vec::new();
+
+        // Get the contract metadata to find the manifest
+        let contract_metadata = match self.contracts_lookup.get(contract_location) {
+            Some(md) => md,
+            None => return code_lenses,
+        };
+
+        // Get the protocol state to find the contract state
+        let protocol_state = match self.protocols.get(&contract_metadata.manifest_location) {
+            Some(ps) => ps,
+            None => return code_lenses,
+        };
+
+        let contract_state = match protocol_state.contracts.get(contract_location) {
+            Some(cs) => cs,
+            None => return code_lenses,
+        };
+
+        // Get the stored cost analysis
+        let cost_analysis = match contract_state.cost_analysis.as_ref() {
+            Some(ca) => ca,
+            None => return code_lenses,
+        };
+
+        // Create a CodeLens for each function definition
+        for (function_name, range) in &contract_state.definitions {
+            // Convert ClarityName to String for lookup
+            let function_name_str = function_name.to_string();
+            if let Some(cost_node) = cost_analysis.get(&function_name_str) {
+                let cost_text = Self::format_cost_for_codelens(&cost_node);
+
+                let code_lens_line = range.start.line;
+                let code_lens_range = lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: code_lens_line,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: code_lens_line,
+                        character: u32::MAX,
+                    },
+                };
+
+                code_lenses.push(lsp_types::CodeLens {
+                    range: code_lens_range,
+                    command: Some(lsp_types::Command {
+                        title: cost_text,
+                        command: "".to_string(), // Empty command means it's just informational
+                        arguments: None,
+                    }),
+                    data: None,
+                });
+            }
+        }
+
+        code_lenses
+    }
+
+    fn format_cost_for_codelens(cost_node: &CostAnalysisNode) -> String {
+        let block_limits = BLOCK_LIMIT_MAINNET;
+        let percents = get_cost_percents(&cost_node.cost.max, &block_limits);
+
+        format!(
+            "runtime: {:.1}%, read count: {:.1}%, read length: {:.1}%, write count: {:.1}%, write length: {:.1}%",
+            percents.runtime,
+            if percents.read_count < 0.01 { "< 0.01".to_string() } else { format!("{:.2}", percents.read_count) },
+            percents.read_length,
+            percents.write_count,
+            percents.write_length
+        )
     }
 
     pub fn get_signature_help(
@@ -558,6 +713,163 @@ impl EditorState {
         contract_state.update_sources(source, with_definitions);
         Ok(())
     }
+
+    pub fn get_function_cost_analysis(
+        &self,
+        contract_location: &FileLocation,
+        position: &lsp_types::Position,
+    ) -> Option<String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::utils::log;
+            log!(
+                "[LSP] get_function_cost_analysis called for {} at line {}, char {}",
+                contract_location,
+                position.line,
+                position.character
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            eprintln!(
+                "[LSP] get_function_cost_analysis called for {} at line {}, char {}",
+                contract_location, position.line, position.character
+            );
+        }
+
+        // Get the contract metadata to find the manifest
+        let contract_metadata = self.contracts_lookup.get(contract_location)?;
+
+        // Get the protocol state to find the contract state
+        let protocol_state = self.protocols.get(&contract_metadata.manifest_location)?;
+        let contract_state = protocol_state.contracts.get(contract_location)?;
+
+        // Get the stored cost analysis
+        let cost_analysis = match contract_state.cost_analysis.as_ref() {
+            Some(ca) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use crate::utils::log;
+                    log!("[LSP] Found cost analysis with {} functions", ca.len());
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    eprintln!("[LSP] Found cost analysis with {} functions", ca.len());
+                }
+                ca
+            }
+            None => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use crate::utils::log;
+                    log!("[LSP] No cost analysis stored for contract");
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    eprintln!("[LSP] No cost analysis stored for contract");
+                }
+                return None;
+            }
+        };
+
+        // Find which function the position is in by checking which function definition contains this position
+        // We'll iterate through the definitions to find the one that contains the position
+        let mut function_name = None;
+        for (name, range) in &contract_state.definitions {
+            if position.line >= range.start.line
+                && position.line <= range.end.line
+                && position.character >= range.start.character
+                && position.character <= range.end.character
+            {
+                function_name = Some(name.to_string());
+                break;
+            }
+        }
+
+        let function_name = match function_name {
+            Some(name) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use crate::utils::log;
+                    log!("[LSP] Found function name: {}", name);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    eprintln!("[LSP] Found function name: {}", name);
+                }
+                name
+            }
+            None => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use crate::utils::log;
+                    log!("[LSP] No function found at position");
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    eprintln!("[LSP] No function found at position");
+                }
+                return None;
+            }
+        };
+
+        // Look up the cost analysis for this function
+        let cost_node = match cost_analysis.get(&function_name) {
+            Some(node) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use crate::utils::log;
+                    log!("[LSP] Found cost node for function: {}", function_name);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    eprintln!("[LSP] Found cost node for function: {}", function_name);
+                }
+                node
+            }
+            None => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use crate::utils::log;
+                    log!("[LSP] No cost node found for function: {}", function_name);
+                    log!(
+                        "[LSP] Available functions: {:?}",
+                        cost_analysis.keys().collect::<Vec<_>>()
+                    );
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    eprintln!("[LSP] No cost node found for function: {}", function_name);
+                    eprintln!(
+                        "[LSP] Available functions: {:?}",
+                        cost_analysis.keys().collect::<Vec<_>>()
+                    );
+                }
+                return None;
+            }
+        };
+
+        // Extract maximum cost from CostAnalysisNode
+        // The user mentioned we can examine CostAnalysisNode at the top level to get the maximum cost
+        // For now, we'll serialize the whole node - the actual structure depends on CostAnalysisNode
+        // TODO: Once we know the structure of CostAnalysisNode, extract max_cost properly
+        let result = serde_json::json!({
+            "function": function_name,
+            "cost_node": format!("{:?}", cost_node)
+        })
+        .to_string();
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::utils::log;
+            log!("[LSP] Returning cost analysis JSON: {}", result);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            eprintln!("[LSP] Returning cost analysis JSON: {}", result);
+        }
+        Some(result)
+    }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -580,6 +892,10 @@ impl ProtocolState {
         definitions: &mut HashMap<QualifiedContractIdentifier, HashMap<ClarityName, Range>>,
         analyses: &mut HashMap<QualifiedContractIdentifier, Option<ContractAnalysis>>,
         clarity_versions: &mut HashMap<QualifiedContractIdentifier, ClarityVersion>,
+        cost_analyses: &mut HashMap<
+            QualifiedContractIdentifier,
+            std::collections::HashMap<String, clarity::vm::costs::analysis::CostAnalysisNode>,
+        >,
     ) {
         // Remove old paths
         // TODO(lgalabru)
@@ -597,6 +913,7 @@ impl ProtocolState {
                 .unwrap_or(DEFAULT_CLARITY_VERSION);
 
             let definitions = definitions.remove(&contract_id).unwrap_or_default();
+            let cost_analysis = cost_analyses.remove(&contract_id);
 
             let contract_state = ContractState::new(
                 contract_id.clone(),
@@ -607,6 +924,7 @@ impl ProtocolState {
                 definitions,
                 contract_location.clone(),
                 clarity_version,
+                cost_analysis,
             );
             self.contracts
                 .insert(contract_location.clone(), contract_state);
@@ -720,6 +1038,99 @@ pub async fn build_state(
         };
     }
 
+    // Compute cost analysis for each contract
+    // Note: Cost analysis must run AFTER contracts are deployed to the session
+    // static_cost_tree needs the contract to be available in the global context
+    let mut cost_analyses = HashMap::new();
+    for (contract_id, _contract_location) in &locations {
+        let clarity_version = clarity_versions
+            .get(contract_id)
+            .copied()
+            .unwrap_or(DEFAULT_CLARITY_VERSION);
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::utils::log;
+            log!(
+                "[LSP] Computing cost analysis for contract: {}",
+                contract_id
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            eprintln!(
+                "[LSP] Computing cost analysis for contract: {}",
+                contract_id
+            );
+        }
+
+        // Check if contract is in session (should be after deployment)
+        let contract_in_session = session.contracts.contains_key(contract_id);
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::utils::log;
+            log!(
+                "[LSP] Contract {} in session: {}",
+                contract_id,
+                contract_in_session
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            eprintln!(
+                "[LSP] Contract {} in session: {}",
+                contract_id, contract_in_session
+            );
+        }
+
+        // Run static_cost_tree for this contract
+        if let Some(cost_analysis) =
+            get_cost_analysis(&mut session, contract_id, clarity_version).await
+        {
+            #[cfg(target_arch = "wasm32")]
+            {
+                use crate::utils::log;
+                log!(
+                    "[LSP] Cost analysis completed for {}: {} functions analyzed",
+                    contract_id,
+                    cost_analysis.len()
+                );
+                for (func_name, _) in &cost_analysis {
+                    log!("[LSP]   - Function: {}", func_name);
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                eprintln!(
+                    "[LSP] Cost analysis completed for {}: {} functions analyzed",
+                    contract_id,
+                    cost_analysis.len()
+                );
+                for (func_name, _) in &cost_analysis {
+                    eprintln!("[LSP]   - Function: {}", func_name);
+                }
+            }
+            cost_analyses.insert(contract_id.clone(), cost_analysis);
+        } else {
+            #[cfg(target_arch = "wasm32")]
+            {
+                use crate::utils::log;
+                log!(
+                    "[LSP] Cost analysis failed or returned None for contract: {}",
+                    contract_id
+                );
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                eprintln!(
+                    "[LSP] Cost analysis failed or returned None for contract: {}",
+                    contract_id
+                );
+            }
+        }
+    }
+
     protocol_state.consolidate(
         &mut locations,
         &mut artifacts.asts,
@@ -728,7 +1139,104 @@ pub async fn build_state(
         &mut definitions,
         &mut analyses,
         &mut clarity_versions,
+        &mut cost_analyses,
     );
 
     Ok(())
+}
+
+// Helper function to compute cost analysis for a contract
+async fn get_cost_analysis(
+    session: &mut clarity_repl::repl::Session,
+    contract_id: &QualifiedContractIdentifier,
+    clarity_version: ClarityVersion,
+) -> Option<std::collections::HashMap<String, clarity::vm::costs::analysis::CostAnalysisNode>> {
+    use clarity::vm::contexts::{CallStack, ContractContext, Environment};
+    use clarity::vm::costs::analysis::static_cost_tree;
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::utils::log;
+        log!(
+            "[LSP] get_cost_analysis called for contract: {} (clarity version: {:?})",
+            contract_id,
+            clarity_version
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        eprintln!(
+            "[LSP] get_cost_analysis called for contract: {} (clarity version: {:?})",
+            contract_id, clarity_version
+        );
+    }
+
+    let tx_sender: clarity_types::types::PrincipalData = session.interpreter.get_tx_sender().into();
+
+    let mut global_context = session
+        .interpreter
+        .get_global_context(clarity_repl::clarity::StacksEpochId::Epoch21, false)
+        .map_err(|e| {
+            #[cfg(target_arch = "wasm32")]
+            {
+                use crate::utils::log;
+                log!("[LSP] Failed to get global context: {}", e);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                eprintln!("[LSP] Failed to get global context: {}", e);
+            }
+            e
+        })
+        .ok()?;
+
+    global_context.begin();
+
+    let cost_result: Result<
+        std::collections::HashMap<String, clarity::vm::costs::analysis::CostAnalysisNode>,
+        clarity_types::Error,
+    > = global_context.execute(|g| {
+        let contract_context = ContractContext::new(contract_id.clone(), clarity_version);
+        let mut call_stack = CallStack::new();
+
+        let mut env = Environment::new(
+            g,
+            &contract_context,
+            &mut call_stack,
+            Some(tx_sender.clone()),
+            Some(tx_sender),
+            None,
+        );
+
+        // convert the cost restult
+        static_cost_tree(&mut env, contract_id).map_err(|e| {
+            #[cfg(target_arch = "wasm32")]
+            {
+                use crate::utils::log;
+                log!("[LSP] static_cost_tree failed with error: {}", e);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                eprintln!("[LSP] static_cost_tree failed with error: {}", e);
+            }
+            clarity_types::Error::from(clarity_types::errors::InterpreterError::Expect(format!(
+                "Cost analysis failed for contract {}: {}",
+                contract_id, e
+            )))
+        })
+    });
+
+    cost_result
+        .map_err(|e| {
+            #[cfg(target_arch = "wasm32")]
+            {
+                use crate::utils::log;
+                log!("[LSP] Cost analysis failed with error: {:?}", e);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                eprintln!("[LSP] Cost analysis failed with error: {:?}", e);
+            }
+        })
+        .ok()
 }

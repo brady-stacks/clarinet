@@ -22,17 +22,30 @@ export async function activate(context: ExtensionContext) {
     }, 10000);
   });
 
+  // Listen for worker errors
+  // worker.addEventListener("error", (e) => {
+  //   console.error("[Clarity LSP] Worker error:", e);
+  //   clearTimeout(workerTimeout!);
+  //   reject(new Error(`Worker error: ${e.message || "Unknown error"}`));
+  // });
+
   worker.addEventListener(
     "message",
     function onServerWorkerReady(e: MessageEvent) {
       if (e.data.method !== "serverWorkerReady") return;
-      worker.removeEventListener("message", onServerWorkerReady);
-      serverWorkerReady!(true);
-      clearTimeout(workerTimeout!);
+        worker.removeEventListener("message", onServerWorkerReady);
+        serverWorkerReady!(true);
+        clearTimeout(workerTimeout!);
     },
   );
 
   await serverWorkerPromise;
+  // try {
+  //   await serverWorkerPromise;
+  // } catch (err) {
+  //   console.error("[Clarity LSP] Failed to start worker:", err);
+  //   throw err;
+  // }
   client = new LanguageClient("clarity-lsp", "Clarity LSP", clientOpts, worker);
 
   initClient(context, client);
