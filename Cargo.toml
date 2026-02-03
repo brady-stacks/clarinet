@@ -22,12 +22,13 @@ default-members = ["components/clarinet-cli"]
 [workspace.package]
 version = "3.13.1"
 
+
 [workspace.dependencies]
-clarity = { git = "https://github.com/stacks-network/stacks-core.git", rev = "b112ddcff5528b63251622802b2965e5a78b58bf", package = "clarity", default-features = false }
-clarity-types = { git = "https://github.com/stacks-network/stacks-core.git", rev = "b112ddcff5528b63251622802b2965e5a78b58bf", package = "clarity-types" }
-stacks-common = { git = "https://github.com/stacks-network/stacks-core.git", rev = "b112ddcff5528b63251622802b2965e5a78b58bf", package = "stacks-common", default-features = false }
-pox-locking = { git = "https://github.com/stacks-network/stacks-core.git", rev = "b112ddcff5528b63251622802b2965e5a78b58bf", package = "pox-locking", default-features = false }
-stackslib = { git = "https://github.com/stacks-network/stacks-core.git", rev = "b112ddcff5528b63251622802b2965e5a78b58bf", package = "stackslib", default-features = false }
+clarity = { git = "https://github.com/stacks-network/stacks-core.git", rev = "179cc48101a3bbbd115407f0459a8866a8f7394d", package = "clarity", default-features = false }
+clarity-types = { git = "https://github.com/stacks-network/stacks-core.git", rev = "179cc48101a3bbbd115407f0459a8866a8f7394d", package = "clarity-types" }
+stacks-common = { git = "https://github.com/stacks-network/stacks-core.git", rev = "179cc48101a3bbbd115407f0459a8866a8f7394d", package = "stacks-common", default-features = false }
+pox-locking = { git = "https://github.com/stacks-network/stacks-core.git", rev = "179cc48101a3bbbd115407f0459a8866a8f7394d", package = "pox-locking", default-features = false }
+stackslib = { git = "https://github.com/stacks-network/stacks-core.git", rev = "179cc48101a3bbbd115407f0459a8866a8f7394d", package = "stackslib", default-features = false }
 
 aes-gcm = "0.10"
 argon2 = "0.5.3"
@@ -42,6 +43,7 @@ chrono = "0.4.42"
 crossterm = "0.28.0"
 dirs = "6.0.0"
 indexmap = "2.13.0"
+tikv-jemallocator = "0.6.1"
 js-sys = "0.3.80"
 libsecp256k1 = "0.7.2"
 pretty_assertions = "1.4"
