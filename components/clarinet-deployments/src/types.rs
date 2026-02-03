@@ -40,6 +40,8 @@ pub enum EpochSpec {
     Epoch3_2,
     #[serde(rename = "3.3")]
     Epoch3_3,
+    #[serde(rename = "3.4")]
+    Epoch3_4,
 }
 
 impl From<StacksEpochId> for EpochSpec {
@@ -56,6 +58,7 @@ impl From<StacksEpochId> for EpochSpec {
             StacksEpochId::Epoch31 => EpochSpec::Epoch3_1,
             StacksEpochId::Epoch32 => EpochSpec::Epoch3_2,
             StacksEpochId::Epoch33 => EpochSpec::Epoch3_3,
+            StacksEpochId::Epoch34 => EpochSpec::Epoch3_4,
             StacksEpochId::Epoch10 => unreachable!("epoch 1.0 is not supported"),
         }
     }
@@ -75,6 +78,7 @@ impl From<EpochSpec> for StacksEpochId {
             EpochSpec::Epoch3_1 => StacksEpochId::Epoch31,
             EpochSpec::Epoch3_2 => StacksEpochId::Epoch32,
             EpochSpec::Epoch3_3 => StacksEpochId::Epoch33,
+            EpochSpec::Epoch3_4 => StacksEpochId::Epoch34,
         }
     }
 }
@@ -111,6 +115,7 @@ impl From<&DevnetConfig> for BurnchainEpochConfig {
                     EpochSpec::Epoch3_1 => Some(config.epoch_3_1),
                     EpochSpec::Epoch3_2 => Some(config.epoch_3_2),
                     EpochSpec::Epoch3_3 => Some(config.epoch_3_3),
+                    EpochSpec::Epoch3_4 => Some(config.epoch_3_4), // TODO: Use epoch_3_4 when available
                 };
                 start_height.map(|start_height| EpochConfig {
                     epoch_name: epoch,
@@ -131,9 +136,10 @@ fn try_clarity_version_from_option(value: Option<u8>) -> Result<ClarityVersion, 
         Some(2) => Ok(ClarityVersion::Clarity2),
         Some(3) => Ok(ClarityVersion::Clarity3),
         Some(4) => Ok(ClarityVersion::Clarity4),
-        Some(_) => {
-            Err("unable to parse clarity_version (can either be '1', '2', '3', or '4'".to_string())
-        }
+        Some(5) => Ok(ClarityVersion::Clarity5),
+        Some(_) => Err(
+            "unable to parse clarity_version (can either be '1', '2', '3', '4', or '5'".to_string(),
+        ),
         None => Ok(DEFAULT_CLARITY_VERSION),
     }
 }
@@ -701,6 +707,7 @@ pub mod clarity_version_serde {
             ClarityVersion::Clarity2 => s.serialize_i64(2),
             ClarityVersion::Clarity3 => s.serialize_i64(3),
             ClarityVersion::Clarity4 => s.serialize_i64(4),
+            ClarityVersion::Clarity5 => s.serialize_i64(5),
         }
     }
 
@@ -714,6 +721,7 @@ pub mod clarity_version_serde {
             2 => Ok(ClarityVersion::Clarity2),
             3 => Ok(ClarityVersion::Clarity3),
             4 => Ok(ClarityVersion::Clarity4),
+            5 => Ok(ClarityVersion::Clarity5),
             _ => Err(serde::de::Error::custom(INVALID_CLARITY_VERSION)),
         }
     }
@@ -1387,6 +1395,7 @@ impl TransactionPlanSpecification {
                                     ClarityVersion::Clarity2 => Some(2),
                                     ClarityVersion::Clarity3 => Some(3),
                                     ClarityVersion::Clarity4 => Some(4),
+                                    ClarityVersion::Clarity5 => Some(5),
                                 },
                             },
                         )
@@ -1414,6 +1423,7 @@ impl TransactionPlanSpecification {
                                     ClarityVersion::Clarity2 => Some(2),
                                     ClarityVersion::Clarity3 => Some(3),
                                     ClarityVersion::Clarity4 => Some(4),
+                                    ClarityVersion::Clarity5 => Some(5),
                                 },
                             },
                         )
@@ -1437,6 +1447,7 @@ impl TransactionPlanSpecification {
                                     ClarityVersion::Clarity2 => Some(2),
                                     ClarityVersion::Clarity3 => Some(3),
                                     ClarityVersion::Clarity4 => Some(4),
+                                    ClarityVersion::Clarity5 => Some(5),
                                 },
                             },
                         )

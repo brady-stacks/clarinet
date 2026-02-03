@@ -426,6 +426,7 @@ pub fn build_completion_item_list(
         ClarityVersion::Clarity2 => COMPLETION_ITEMS_CLARITY_2.to_vec(),
         ClarityVersion::Clarity3 => COMPLETION_ITEMS_CLARITY_3.to_vec(),
         ClarityVersion::Clarity4 => COMPLETION_ITEMS_CLARITY_4.to_vec(),
+        ClarityVersion::Clarity5 => COMPLETION_ITEMS_CLARITY_4.to_vec(), // TODO: Use COMPLETION_ITEMS_CLARITY_5 when available
     };
     let placeholder_pattern = Regex::new(r" \$\{\d+:[\w-]+\}").unwrap();
 
@@ -805,6 +806,7 @@ fn get_iterator_cb_completion_item(version: &ClarityVersion, func: &str) -> Vec<
             ClarityVersion::Clarity2 => VALID_MAP_FUNCTIONS_CLARITY_2.to_vec(),
             ClarityVersion::Clarity3 => VALID_MAP_FUNCTIONS_CLARITY_3.to_vec(),
             ClarityVersion::Clarity4 => VALID_MAP_FUNCTIONS_CLARITY_4.to_vec(),
+            ClarityVersion::Clarity5 => VALID_MAP_FUNCTIONS_CLARITY_4.to_vec(), // TODO: Use VALID_MAP_FUNCTIONS_CLARITY_5 when available
         };
     }
     if func.to_string().eq(&NativeFunctions::Filter.to_string()) {
@@ -813,6 +815,7 @@ fn get_iterator_cb_completion_item(version: &ClarityVersion, func: &str) -> Vec<
             ClarityVersion::Clarity2 => VALID_FILTER_FUNCTIONS_CLARITY_2.to_vec(),
             ClarityVersion::Clarity3 => VALID_FILTER_FUNCTIONS_CLARITY_3.to_vec(),
             ClarityVersion::Clarity4 => VALID_FILTER_FUNCTIONS_CLARITY_4.to_vec(),
+            ClarityVersion::Clarity5 => VALID_FILTER_FUNCTIONS_CLARITY_4.to_vec(), // TODO: Use VALID_FILTER_FUNCTIONS_CLARITY_5 when available
         };
     }
     match version {
@@ -820,6 +823,7 @@ fn get_iterator_cb_completion_item(version: &ClarityVersion, func: &str) -> Vec<
         ClarityVersion::Clarity2 => VALID_FOLD_FUNCTIONS_CLARITY_2.to_vec(),
         ClarityVersion::Clarity3 => VALID_FOLD_FUNCTIONS_CLARITY_3.to_vec(),
         ClarityVersion::Clarity4 => VALID_FOLD_FUNCTIONS_CLARITY_4.to_vec(),
+        ClarityVersion::Clarity5 => VALID_FOLD_FUNCTIONS_CLARITY_4.to_vec(), // TODO: Use VALID_FOLD_FUNCTIONS_CLARITY_5 when available
     }
 }
 
