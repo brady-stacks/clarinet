@@ -1,7 +1,5 @@
 mod native_bridge;
 
-use std::sync::mpsc;
-
 use clarity_lsp::utils;
 use clarity_repl::clarity::vm::diagnostic::{
     Diagnostic as ClarityDiagnostic, Level as ClarityLevel,
@@ -32,18 +30,15 @@ async fn do_run_lsp() -> Result<(), String> {
 
     let (notification_tx, notification_rx) = unbounded();
     let (request_tx, request_rx) = unbounded();
-    let (response_tx, response_rx) = mpsc::channel();
     std::thread::spawn(move || {
         hiro_system_kit::nestable_block_on(native_bridge::start_language_server(
             notification_rx,
             request_rx,
-            response_tx,
         ));
     });
 
-    let (service, socket) = LspService::new(|client| {
-        LspNativeBridge::new(client, notification_tx, request_tx, response_rx)
-    });
+    let (service, socket) =
+        LspService::new(|client| LspNativeBridge::new(client, notification_tx, request_tx));
     Server::new(stdin, stdout, socket).serve(service).await;
     Ok(())
 }
@@ -93,21 +88,15 @@ pub fn clarity_diagnostic_to_tower_lsp_type(
 
 #[test]
 fn test_opening_counter_contract_should_return_fresh_analysis() {
-    use std::sync::mpsc::channel;
-
     use clarity_lsp::backend::{LspNotification, LspNotificationResponse};
     use crossbeam_channel::unbounded;
 
-    use crate::lsp::native_bridge::LspResponse;
-
     let (notification_tx, notification_rx) = unbounded();
     let (_request_tx, request_rx) = unbounded();
-    let (response_tx, response_rx) = channel();
     std::thread::spawn(move || {
         hiro_system_kit::nestable_block_on(native_bridge::start_language_server(
             notification_rx,
             request_rx,
-            response_tx,
         ));
     });
 
@@ -120,11 +109,12 @@ fn test_opening_counter_contract_should_return_fresh_analysis() {
         counter_path
     };
 
-    let _ = notification_tx.send(LspNotification::ContractOpened(contract_location.clone()));
-    let response = response_rx.recv().expect("Unable to get response");
-    let LspResponse::Notification(response) = response else {
-        panic!("Unable to get response")
-    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let _ = notification_tx.send((
+        LspNotification::ContractOpened(contract_location.clone()),
+        reply_tx,
+    ));
+    let response = reply_rx.blocking_recv().expect("Unable to get response");
 
     // the counter project should emit 2 warnings and 2 notes coming from counter.clar
     assert_eq!(response.aggregated_diagnostics.len(), 2);
@@ -132,32 +122,24 @@ fn test_opening_counter_contract_should_return_fresh_analysis() {
     assert_eq!(diags.len(), 4);
 
     // re-opening this contract should not trigger a full analysis
-    let _ = notification_tx.send(LspNotification::ContractOpened(contract_location));
-    let response = response_rx.recv().expect("Unable to get response");
-    let LspResponse::Notification(response) = response else {
-        panic!("Unable to get response")
-    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let _ = notification_tx.send((LspNotification::ContractOpened(contract_location), reply_tx));
+    let response = reply_rx.blocking_recv().expect("Unable to get response");
 
     assert_eq!(response, LspNotificationResponse::default());
 }
 
 #[test]
 fn test_opening_counter_manifest_should_return_fresh_analysis() {
-    use std::sync::mpsc::channel;
-
     use clarity_lsp::backend::{LspNotification, LspNotificationResponse};
     use crossbeam_channel::unbounded;
 
-    use crate::lsp::native_bridge::LspResponse;
-
     let (notification_tx, notification_rx) = unbounded();
     let (_request_tx, request_rx) = unbounded();
-    let (response_tx, response_rx) = channel();
     std::thread::spawn(move || {
         hiro_system_kit::nestable_block_on(native_bridge::start_language_server(
             notification_rx,
             request_rx,
-            response_tx,
         ));
     });
 
@@ -169,11 +151,12 @@ fn test_opening_counter_manifest_should_return_fresh_analysis() {
         manifest_path
     };
 
-    let _ = notification_tx.send(LspNotification::ManifestOpened(manifest_location.clone()));
-    let response = response_rx.recv().expect("Unable to get response");
-    let LspResponse::Notification(response) = response else {
-        panic!("Unable to get response")
-    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let _ = notification_tx.send((
+        LspNotification::ManifestOpened(manifest_location.clone()),
+        reply_tx,
+    ));
+    let response = reply_rx.blocking_recv().expect("Unable to get response");
 
     // the counter project should emit 2 warnings and 2 notes coming from counter.clar
     assert_eq!(response.aggregated_diagnostics.len(), 2);
@@ -181,31 +164,23 @@ fn test_opening_counter_manifest_should_return_fresh_analysis() {
     assert_eq!(diags.len(), 4);
 
     // re-opening this manifest should not trigger a full analysis
-    let _ = notification_tx.send(LspNotification::ManifestOpened(manifest_location));
-    let response = response_rx.recv().expect("Unable to get response");
-    let LspResponse::Notification(response) = response else {
-        panic!("Unable to get response")
-    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let _ = notification_tx.send((LspNotification::ManifestOpened(manifest_location), reply_tx));
+    let response = reply_rx.blocking_recv().expect("Unable to get response");
     assert_eq!(response, LspNotificationResponse::default());
 }
 
 #[test]
 fn test_opening_simple_nft_manifest_should_return_fresh_analysis() {
-    use std::sync::mpsc::channel;
-
     use clarity_lsp::backend::LspNotification;
     use crossbeam_channel::unbounded;
 
-    use crate::lsp::native_bridge::LspResponse;
-
     let (notification_tx, notification_rx) = unbounded();
     let (_request_tx, request_rx) = unbounded();
-    let (response_tx, response_rx) = channel();
     std::thread::spawn(move || {
         hiro_system_kit::nestable_block_on(native_bridge::start_language_server(
             notification_rx,
             request_rx,
-            response_tx,
         ));
     });
 
@@ -214,11 +189,9 @@ fn test_opening_simple_nft_manifest_should_return_fresh_analysis() {
     manifest_location.push("simple-nft");
     manifest_location.push("Clarinet.toml");
 
-    let _ = notification_tx.send(LspNotification::ManifestOpened(manifest_location));
-    let response = response_rx.recv().expect("Unable to get response");
-    let LspResponse::Notification(response) = response else {
-        panic!("Unable to get response")
-    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let _ = notification_tx.send((LspNotification::ManifestOpened(manifest_location), reply_tx));
+    let response = reply_rx.blocking_recv().expect("Unable to get response");
 
     assert_eq!(response.aggregated_diagnostics.len(), 1);
     let (_, diags_0) = &response.aggregated_diagnostics[0];
