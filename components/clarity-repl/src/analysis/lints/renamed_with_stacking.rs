@@ -133,7 +133,8 @@ impl Lint for RenamedWithStacking<'_> {
 #[cfg(test)]
 mod tests {
     use clarity::types::StacksEpochId;
-    use clarity::vm::diagnostic::Level;
+    use clarity::vm::diagnostic::{Diagnostic, Level};
+    use clarity::vm::ClarityVersion;
     use indoc::indoc;
 
     use super::{check_renamed_with_stacking, RenamedWithStacking};
@@ -142,6 +143,31 @@ mod tests {
     use crate::repl::session::Session;
     use crate::repl::SessionSettings;
     use crate::test_fixtures::clarity_contract::ClarityContractBuilder;
+
+    /// Parse `snippet` as a Clarity 6 contract and run the lint over the raw AST.
+    ///
+    /// `build_ast` only parses, so this exercises the visitor in isolation: the
+    /// result cannot be influenced by the type checker accepting or rejecting the
+    /// contract.
+    fn lint_ast(snippet: String) -> Vec<Diagnostic> {
+        let mut session = Session::new_without_boot_contracts(SessionSettings::default());
+        session.update_epoch(StacksEpochId::Epoch40);
+
+        let contract = ClarityContractBuilder::new()
+            .code_source(snippet)
+            .name("checker")
+            .epoch(StacksEpochId::Epoch40)
+            .clarity_version(ClarityVersion::Clarity6)
+            .build();
+        let (ast, _, _) = session.interpreter.build_ast(&contract);
+
+        check_renamed_with_stacking(
+            &ast.expressions,
+            ClarityVersion::Clarity6,
+            &Vec::<Annotation>::new(),
+            Level::Warning,
+        )
+    }
 
     fn run_snippet(
         snippet: String,
@@ -211,6 +237,106 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("with-staking"));
+    }
+
+    /// FAILING (review finding #1): the lint never fires for `restrict-assets?`.
+    ///
+    /// `with-stacking` is an allowance, valid in both `as-contract?` and
+    /// `restrict-assets?`. Only the former is covered:
+    ///
+    /// - `as-contract?` dispatches to `traverse_as_contract_safe`, which calls
+    ///   `traverse_expr` on each element of the allowance list, so the
+    ///   `(with-stacking u1)` call reaches `visit_call_user_defined`.
+    /// - `restrict-assets?` dispatches to the `RestrictAssets` arm of
+    ///   `traverse_list` (ast_visitor.rs), which passes `args[0]` — the *owner* —
+    ///   to `match_pairs` instead of `args[1]`. `match_pairs` calls `match_list()`
+    ///   on an atom, gets `None`, and `unwrap_or_default()` yields an empty map, so
+    ///   the allowance list is dropped entirely.
+    ///
+    /// Fixing the index alone is not enough: `traverse_restrict_assets` only
+    /// descends into each binding's *value* (`u1`), never the `(with-stacking u1)`
+    /// call expression itself.
+    #[test]
+    fn warn_with_stacking_in_restrict_assets() {
+        #[rustfmt::skip]
+        let snippet = indoc!("
+            (define-public (test)
+                (restrict-assets? tx-sender ((with-stacking u1)) (ok true)))
+        ").to_string();
+
+        let diagnostics = lint_ast(snippet);
+
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "expected `with-stacking` in a `restrict-assets?` allowance list to be \
+             flagged, but the allowance list is never traversed; got {diagnostics:?}"
+        );
+    }
+
+    /// FAILING (review finding #2): the lint fires on a user-defined function that
+    /// happens to be named `with-stacking`.
+    ///
+    /// `is_reserved_word` reserves only `block-height`, so once `with-stacking`
+    /// stopped being a builtin in Clarity 6 it became a legal user identifier.
+    /// `visit_call_user_defined` cannot tell the two apart, so a contract that
+    /// defines and calls its own `with-stacking` is told to rename it.
+    ///
+    /// The repo already settled this question the other way for the removed
+    /// `at-block` builtin — see `lints/at_block.rs`, which disables itself at
+    /// Clarity 5+ with the comment "`at-block` is no longer part of the language,
+    /// so allow it to be used as a user-defined function".
+    #[test]
+    fn no_warning_for_user_defined_with_stacking() {
+        #[rustfmt::skip]
+        let snippet = indoc!("
+            (define-private (with-stacking (amount uint))
+                amount)
+            (define-public (test)
+                (ok (with-stacking u1)))
+        ").to_string();
+
+        let diagnostics = lint_ast(snippet);
+
+        assert!(
+            diagnostics.is_empty(),
+            "`with-stacking` is a legal user-defined function name in Clarity 6, so \
+             calling it must not be reported as the renamed builtin; got {diagnostics:?}"
+        );
+    }
+
+    /// FAILING (review finding #2, end-to-end): same false positive, but reached
+    /// through the normal lint pass rather than the pre-analysis hook.
+    ///
+    /// This contract type-checks cleanly, so `clarity::vm::analysis::run_analysis`
+    /// succeeds and `RenamedWithStacking::run_pass` runs as a regular lint. The bad
+    /// diagnostic is therefore user-visible from `clarinet check`, not just an
+    /// artifact of calling the checker directly.
+    #[test]
+    fn no_warning_for_user_defined_with_stacking_end_to_end() {
+        #[rustfmt::skip]
+        let snippet = indoc!("
+            (define-private (with-stacking (amount uint))
+                amount)
+            (define-public (test)
+                (ok (with-stacking u1)))
+        ").to_string();
+
+        let result = run_snippet(snippet)
+            .expect("contract defining its own `with-stacking` should type-check");
+
+        let renamed: Vec<&str> = result
+            .lint_diagnostics
+            .iter()
+            .map(|ld| ld.diagnostic.message.as_str())
+            .filter(|message| message.contains("was renamed to `with-staking`"))
+            .collect();
+
+        assert!(
+            renamed.is_empty(),
+            "calling a user-defined `with-stacking` must not be reported as the \
+             renamed builtin; got {renamed:?}"
+        );
     }
 
     #[test]
