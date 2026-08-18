@@ -15,27 +15,23 @@ import {
 import { initClient, clientOpts } from "./common";
 
 // ---------------------------------------------------------------------------
-// CodeLens provider: show "Debug with Clarinet" above test blocks in files
-// that use startDebugServer from @stacks/clarinet-sdk.
+// CodeLens provider: show "Debug" above every it/test block in TypeScript
+// test files. The command handles missing-manifest gracefully.
 // ---------------------------------------------------------------------------
 
-const DEBUG_PATTERN = /\bstartDebugServer\b/;
 const TEST_PATTERN = /^\s*(?:it|test)\s*\(\s*(['"`])(.*?)\1/;
 
 class ClarityDebugTestLensProvider implements vscode.CodeLensProvider {
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    const text = document.getText();
-    if (!DEBUG_PATTERN.test(text)) return [];
-
     const lenses: vscode.CodeLens[] = [];
-    const lines = text.split("\n");
+    const lines = document.getText().split("\n");
     for (let i = 0; i < lines.length; i++) {
       const m = TEST_PATTERN.exec(lines[i]);
       if (!m) continue;
       const range = new vscode.Range(i, 0, i, lines[i].length);
       lenses.push(
         new vscode.CodeLens(range, {
-          title: "$(debug) Debug with Clarinet",
+          title: "$(debug) Debug",
           command: "clarity.debugTest",
           arguments: [document.uri, m[2]],
         }),
@@ -279,7 +275,7 @@ export async function activate(context: ExtensionContext) {
 
           // Run the selected test file directly. Passing the file path avoids
           // relying on project-specific Vitest include patterns or extra config files.
-          const cmd = `CLARINET_DEBUG_PORT=${sdkPort} npx vitest run ${JSON.stringify(relativeFile)} -t ${JSON.stringify(testName)}`;
+          const cmd = `CLARINET_DEBUG_PORT=${sdkPort} npx vitest run --testTimeout=0 ${JSON.stringify(relativeFile)} -t ${JSON.stringify(testName)}`;
           debugOutput.info(`  opening terminal: ${cmd}`);
           const terminal = vscode.window.createTerminal({
             name: `Clarinet Debug: ${testName}`,

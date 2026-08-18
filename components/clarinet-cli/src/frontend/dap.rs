@@ -5,7 +5,7 @@ use clarinet_deployments::setup_session_with_deployment;
 use clarinet_files::{ProjectManifest, StacksNetwork};
 use clarity::vm::types::QualifiedContractIdentifier;
 use clarity::vm::EvaluationResult;
-use clarity_repl::repl::clarity_values::value_to_string;
+use clarity_repl::repl::clarity_values::{to_raw_value, value_to_string};
 use clarity_repl::repl::debug::dap::DAPDebugger;
 use clarity_repl::utils::Environment;
 
@@ -91,6 +91,18 @@ pub fn run_dap_server(
         false,
     )
     .session;
+
+    // Extract accounts from the genesis spec before consuming deployment.contracts.
+    let mut deployer_address = String::new();
+    let mut accounts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(ref spec) = deployment.genesis {
+        for wallet in &spec.wallets {
+            if wallet.name == "deployer" {
+                deployer_address = wallet.address.to_string();
+            }
+            accounts.insert(wallet.name.clone(), wallet.address.to_string());
+        }
+    }
 
     // Pre-compute the contract → path maps; we need them in both threads.
     let contract_maps: Vec<(QualifiedContractIdentifier, PathBuf)> = deployment
@@ -282,6 +294,87 @@ pub fn run_dap_server(
 
                 write_response(&mut writer, &response)?;
             }
+            // `getAccounts` returns the project accounts (deployer + wallets).
+            "getAccounts" => {
+                let response = serde_json::json!({
+                    "id": id,
+                    "result": {
+                        "deployer": deployer_address,
+                        "accounts": accounts
+                    }
+                });
+                write_response(&mut writer, &response)?;
+            }
+            // `blockHeight` returns the current stacks and burn block heights.
+            "blockHeight" => {
+                let stacks_height = session.interpreter.get_block_height();
+                let burn_height = session.interpreter.get_burn_block_height();
+                let response = serde_json::json!({
+                    "id": id,
+                    "result": {
+                        "stacksHeight": stacks_height,
+                        "burnHeight": burn_height
+                    }
+                });
+                write_response(&mut writer, &response)?;
+            }
+            // `getAssetsMap` returns STX/FT/NFT balances with amounts as strings
+            // to avoid u128 → JSON precision loss.
+            "getAssetsMap" => {
+                let assets = session.get_assets_maps();
+                let assets_json: serde_json::Map<String, serde_json::Value> = assets
+                    .into_iter()
+                    .map(|(asset, balances)| {
+                        let bal: serde_json::Value = balances
+                            .into_iter()
+                            .map(|(addr, amount)| {
+                                (addr, serde_json::Value::String(amount.to_string()))
+                            })
+                            .collect::<serde_json::Map<_, _>>()
+                            .into();
+                        (asset, bal)
+                    })
+                    .collect();
+                let response = serde_json::json!({"id": id, "result": {"assets": assets_json}});
+                write_response(&mut writer, &response)?;
+            }
+            // `mineBlock` advances the chain tip by 1 and evaluates an array of
+            // transactions under the debugger, returning hex-encoded results.
+            "mineBlock" => {
+                let txs = request["txs"].as_array().cloned().unwrap_or_default();
+
+                session.advance_chain_tip(1);
+
+                let mut tx_results: Vec<serde_json::Value> = Vec::new();
+                let mut block_error: Option<String> = None;
+
+                for tx in &txs {
+                    match eval_tx_under_debugger(&mut session, &mut dap, tx) {
+                        Ok(result) => tx_results.push(result),
+                        Err(e) => {
+                            block_error = Some(e);
+                            break;
+                        }
+                    }
+                }
+
+                let response = match block_error {
+                    Some(e) => serde_json::json!({"id": id, "error": e}),
+                    None => {
+                        let stacks_height = session.interpreter.get_block_height();
+                        let burn_height = session.interpreter.get_burn_block_height();
+                        serde_json::json!({
+                            "id": id,
+                            "result": {
+                                "stacksHeight": stacks_height,
+                                "burnHeight": burn_height,
+                                "txs": tx_results
+                            }
+                        })
+                    }
+                };
+                write_response(&mut writer, &response)?;
+            }
             _ => {
                 let response =
                     serde_json::json!({"id": id, "error": format!("unknown method: {method}")});
@@ -301,21 +394,149 @@ fn eval_snippet(
 ) -> serde_json::Value {
     match session.eval_with_hooks(snippet, Some(vec![dap]), false) {
         Ok(result) => {
-            let value_str = match &result.result {
-                EvaluationResult::Contract(contract_result) => contract_result
-                    .result
-                    .as_ref()
-                    .map(value_to_string)
-                    .unwrap_or_default(),
-                EvaluationResult::Snippet(snippet_result) => {
-                    value_to_string(&snippet_result.result)
+            let (value_str, hex) = match &result.result {
+                EvaluationResult::Contract(contract_result) => {
+                    let v = contract_result.result.as_ref();
+                    (
+                        v.map(value_to_string).unwrap_or_default(),
+                        v.map(to_raw_value).unwrap_or_else(|| "0x03".into()),
+                    )
                 }
+                EvaluationResult::Snippet(snippet_result) => (
+                    value_to_string(&snippet_result.result),
+                    to_raw_value(&snippet_result.result),
+                ),
             };
-            serde_json::json!({"id": id, "result": {"value": value_str}})
+            serde_json::json!({"id": id, "result": {"value": value_str, "hex": hex}})
         }
         Err(diagnostics) => {
             let errors: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
             serde_json::json!({"id": id, "error": errors.join("; ")})
+        }
+    }
+}
+
+/// Evaluate a single tx object from a `mineBlock` request under the debugger.
+/// Returns `{"result": "0x...", "events": "[]"}` on success.
+fn eval_tx_under_debugger(
+    session: &mut clarity_repl::repl::Session,
+    dap: &mut DAPDebugger,
+    tx: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if let Some(call) = tx.get("callPublicFn").or_else(|| tx.get("callPrivateFn")) {
+        eval_contract_call(session, dap, call)
+    } else if let Some(transfer) = tx.get("transferSTX") {
+        eval_stx_transfer(session, dap, transfer)
+    } else if tx.get("deployContract").is_some() {
+        Err("deployContract is not supported in debug mode".into())
+    } else {
+        Err("unknown tx type in mineBlock".into())
+    }
+}
+
+fn eval_contract_call(
+    session: &mut clarity_repl::repl::Session,
+    dap: &mut DAPDebugger,
+    call: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let contract = call["contract"].as_str().unwrap_or("").to_string();
+    let method = call["method"].as_str().unwrap_or("").to_string();
+    let sender = call["sender"].as_str().map(|s| s.to_string());
+    let args: Vec<String> = call["args"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let full_contract_principal = if contract.contains('.') && !contract.starts_with('.') {
+        format!("'{contract}")
+    } else {
+        let short = contract.trim_start_matches('.');
+        dap.contract_id_to_path
+            .keys()
+            .find(|id| id.name.as_str() == short)
+            .map(|id| format!("'{id}"))
+            .unwrap_or_else(|| format!(".{short}"))
+    };
+
+    let args_str = args.join(" ");
+    let snippet = if args_str.is_empty() {
+        format!("(contract-call? {full_contract_principal} {method})")
+    } else {
+        format!("(contract-call? {full_contract_principal} {method} {args_str})")
+    };
+
+    let original_sender = sender.as_ref().map(|_| session.get_tx_sender());
+    if let Some(ref s) = sender {
+        session.set_tx_sender(s);
+    }
+
+    let contract_id = dap
+        .contract_id_to_path
+        .keys()
+        .find(|id| id.name.as_str() == contract.trim_start_matches('.'))
+        .cloned()
+        .unwrap_or_else(QualifiedContractIdentifier::transient);
+    dap.prepare_for_call(&contract_id, &snippet);
+
+    let result = eval_to_tx_result(session, dap, snippet);
+
+    if let Some(ref prev) = original_sender {
+        session.set_tx_sender(prev);
+    }
+
+    result
+}
+
+fn eval_stx_transfer(
+    session: &mut clarity_repl::repl::Session,
+    dap: &mut DAPDebugger,
+    transfer: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let amount = transfer["amount"]
+        .as_u64()
+        .ok_or_else(|| "transferSTX: missing or invalid amount".to_string())?;
+    let recipient = transfer["recipient"]
+        .as_str()
+        .ok_or_else(|| "transferSTX: missing recipient".to_string())?;
+    let sender = transfer["sender"]
+        .as_str()
+        .ok_or_else(|| "transferSTX: missing sender".to_string())?;
+
+    let snippet = format!("(stx-transfer? u{amount} '{sender} '{recipient})");
+    let original_sender = session.get_tx_sender();
+    session.set_tx_sender(sender);
+    let result = eval_to_tx_result(session, dap, snippet);
+    session.set_tx_sender(&original_sender);
+    result
+}
+
+/// Evaluate a snippet and return `{"result": "0x...", "events": "[]"}`.
+fn eval_to_tx_result(
+    session: &mut clarity_repl::repl::Session,
+    dap: &mut DAPDebugger,
+    snippet: String,
+) -> Result<serde_json::Value, String> {
+    match session.eval_with_hooks(snippet, Some(vec![dap]), false) {
+        Ok(result) => {
+            let hex = match &result.result {
+                EvaluationResult::Contract(cr) => cr
+                    .result
+                    .as_ref()
+                    .map(to_raw_value)
+                    .unwrap_or_else(|| "0x03".into()),
+                EvaluationResult::Snippet(sr) => to_raw_value(&sr.result),
+            };
+            // Events are not yet serialized in the debug protocol; callers receive an
+            // empty array. Full event support can be added in a follow-up.
+            Ok(serde_json::json!({"result": hex, "events": "[]"}))
+        }
+        Err(diagnostics) => {
+            let errors: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+            Err(errors.join("; "))
         }
     }
 }

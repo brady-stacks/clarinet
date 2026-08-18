@@ -50,6 +50,19 @@ afterEach(async (ctx) => {
 });
 
 beforeAll(async () => {
+  const debugPort = process.env["CLARINET_DEBUG_PORT"]
+    ? Number(process.env["CLARINET_DEBUG_PORT"])
+    : undefined;
+
+  if (debugPort) {
+    const { DebugSimnet } = await import("@stacks/clarinet-sdk");
+    // Replace the global simnet with a synchronous debug-server-backed instance.
+    (global as any).simnet = await DebugSimnet.connect(debugPort);
+    // Disable beforeEach re-init: debug sessions are not reset between tests.
+    global.options.clarinet.initBeforeEach = false;
+    return;
+  }
+
   const { initBeforeEach, manifestPath } = global.options.clarinet;
 
   if (!initBeforeEach) {
