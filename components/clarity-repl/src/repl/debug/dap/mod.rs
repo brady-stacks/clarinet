@@ -1334,12 +1334,21 @@ mod tests {
         // the full list for the file, which is now just line 20.
         set_breakpoint(&mut debugger, 2, 20);
 
-        let armed: Vec<usize> = debugger.get_state().breakpoints.keys().copied().collect();
+        let armed: Vec<u32> = debugger
+            .get_state()
+            .breakpoints
+            .values()
+            .map(|breakpoint| {
+                let super::super::BreakpointData::Source(source) = &breakpoint.data else {
+                    panic!("expected a source breakpoint")
+                };
+                source.line
+            })
+            .collect();
         assert_eq!(
-            armed.len(),
-            1,
-            "line 12 is still armed after being moved to line 20; breakpoint \
-             ids now registered: {armed:?}"
+            armed,
+            vec![20],
+            "setBreakpoints did not replace line 12 with line 20: {armed:?}"
         );
     }
     /// Finding 14 of the PR #2483 review: `prepare_for_call` resets execution

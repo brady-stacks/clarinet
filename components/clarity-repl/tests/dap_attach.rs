@@ -248,10 +248,19 @@ fn a_disconnect_before_attach_does_not_panic() {
         "arguments": {},
     }));
 
-    let outcome = editor.wait_for_init_attach(Duration::from_secs(2));
+    let response = editor.recv();
+    assert_eq!(
+        response["success"],
+        serde_json::json!(true),
+        "disconnect should receive a successful response, got {response}"
+    );
+
+    let outcome = editor
+        .wait_for_init_attach(Duration::from_secs(2))
+        .expect("disconnect left init_attach blocked");
     assert!(
-        !matches!(outcome, Some(Err(_))),
-        "a `disconnect` before `attach` panicked the debugger: {outcome:?}"
+        matches!(outcome, Ok(Ok(()))),
+        "a `disconnect` before `attach` did not end the handshake cleanly: {outcome:?}"
     );
 }
 

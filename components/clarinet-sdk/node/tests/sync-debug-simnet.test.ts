@@ -198,24 +198,13 @@ it("the debug proxy implements the whole Simnet surface", async () => {
  * `CLARINET_DEBUG_PORT` writes an empty lcov, and a coverage gate reads that as
  * 0% rather than "unsupported".
  *
- * Either fix is fine: throw a named error, or have the server implement it.
+ * Until the server implements reporting, the proxy should reject the operation
+ * explicitly instead of returning data that looks valid.
  */
-it("collectReport does not silently return an empty report", async () => {
+it("collectReport reports that coverage is unsupported", async () => {
   const { proxy } = await connectProxy();
 
-  let report: { coverage: string; costs: string };
-  try {
-    report = proxy.collectReport(false, "");
-  } catch (error) {
-    // Acceptable: the proxy says out loud that it cannot produce a report.
-    expect((error as Error).message).toMatch(/coverage|cost|report/i);
-    return;
-  }
-
-  expect(
-    report.coverage,
-    "an empty lcov reads as 0% coverage, not as an unsupported operation",
-  ).not.toBe("");
+  expect(() => proxy.collectReport(false, "")).toThrow(/coverage|cost|report/i);
 });
 
 /**
@@ -319,5 +308,11 @@ it("initSimnet honours or rejects its options in debug mode", async () => {
   expect(
     initSession,
     "initSession went to the server with no trace of the options initSimnet was given",
-  ).toMatchObject({ apiUrl: "http://example.invalid/" });
+  ).toMatchObject({
+    options: {
+      trackCosts: true,
+      trackCoverage: true,
+      apiUrl: "http://example.invalid/",
+    },
+  });
 });
