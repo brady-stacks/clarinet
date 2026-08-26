@@ -46,6 +46,15 @@ function mockServerMain() {
       socket.write(line({ id: request.id, result: { server: label } }));
       return;
     }
+    if (mode === "coalesced") {
+      // A late reply to an earlier, abandoned request lands in the same TCP
+      // segment as the reply to this one.
+      socket.write(
+        line({ id: 999, result: { server: "stale" } }) +
+          line({ id: request.id, result: { server: "fresh" } }),
+      );
+      return;
+    }
     socket.write(
       line({ id: request.id, result: { result: "0x0703", events: "[]", costs: "null" } }),
     );
@@ -83,7 +92,7 @@ type MockServer = {
 const workers: Worker[] = [];
 
 async function startMockServer(
-  options: { mode?: "default" | "labelled"; label?: string } = {},
+  options: { mode?: "default" | "labelled" | "coalesced"; label?: string } = {},
 ): Promise<MockServer> {
   const received: SdkRequest[] = [];
   const worker = new Worker(MOCK_SERVER_SOURCE, {
@@ -112,7 +121,10 @@ async function startMockServer(
 }
 
 /** Connect the worker transport and build a proxy against a mock server. */
-async function connectProxy(options?: { mode?: "default" | "labelled"; label?: string }) {
+async function connectProxy(options?: {
+  mode?: "default" | "labelled" | "coalesced";
+  label?: string;
+}) {
   const server = await startMockServer(options);
   await connectSyncSocket(server.port);
   return { proxy: createSyncDebugSimnet(), server };
@@ -245,4 +257,29 @@ it("connectSyncSocket switches to a new port", async () => {
     answered,
     `connectSyncSocket(${second.port}) was a no-op; requests still go to the server on ${first.port}`,
   ).toBe("second");
+});
+
+/**
+ * Finding 25 of the PR #2483 review: the worker's `socket.on("data")` handler
+ * hands the first non-empty line to whatever request is pending and then
+ * `break`s, discarding the rest of the chunk. The server echoes an `id` on every
+ * response and `DebugClient` matches on it, but the synchronous path that
+ * replaces `DebugClient` under `CLARINET_DEBUG_PORT` ignores it entirely.
+ *
+ * Requests are serialized, so this is correct on the happy path. It is not
+ * correct after a desync: once the 30 s timeout clears `pendingResolve` the late
+ * reply is dropped, and any response coalesced into the same chunk as another is
+ * dropped too — so one call's result is attributed to the next. Match on `id`
+ * and drop non-matching lines explicitly; the field is already on the wire.
+ */
+it("syncSend returns the response matching its request id", async () => {
+  const server = await startMockServer({ mode: "coalesced" });
+  await connectSyncSocket(server.port);
+
+  const response = JSON.parse(syncSend({ id: 7, method: "ping" }));
+
+  expect(
+    response,
+    "a stale reply sharing the chunk was returned instead of this request's own",
+  ).toMatchObject({ id: 7, result: { server: "fresh" } });
 });
