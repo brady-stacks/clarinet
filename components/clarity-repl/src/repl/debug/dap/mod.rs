@@ -1260,3 +1260,73 @@ fn type_for_value(value: &Value) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CONTRACT: &str = "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.counter";
+    const SOURCE: &str = "/project/contracts/counter.clar";
+
+    /// A debugger in attach mode with one contract registered and its debug
+    /// state already built, standing in for a session that has completed
+    /// `attach` and is receiving breakpoint configuration.
+    fn attached_debugger() -> DAPDebugger {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let reader: Box<dyn AsyncRead + Unpin + Send> = Box::new(tokio::io::empty());
+        let writer: Box<dyn AsyncWrite + Unpin + Send> = Box::new(tokio::io::sink());
+        let mut debugger = DAPDebugger::from_io(rt, reader, writer, true);
+
+        let contract_id = QualifiedContractIdentifier::parse(CONTRACT).unwrap();
+        let path = PathBuf::from(SOURCE);
+        debugger
+            .path_to_contract_id
+            .insert(path.clone(), contract_id.clone());
+        debugger
+            .contract_id_to_path
+            .insert(contract_id.clone(), path);
+        debugger.state = Some(DebugState::new(&contract_id, ""));
+        debugger
+    }
+
+    fn set_breakpoint(debugger: &mut DAPDebugger, seq: i64, line: u32) {
+        let arguments = serde_json::from_value(serde_json::json!({
+            "source": {"path": SOURCE},
+            "breakpoints": [{"line": line}],
+        }))
+        .unwrap();
+        debugger.set_breakpoints(seq, arguments);
+    }
+
+    /// Finding 6 of the PR #2483 review: DAP's `setBreakpoints` is
+    /// replace-all-for-this-source, but this implementation only adds, and
+    /// `reset_for_new_call` deliberately preserves the existing set.
+    ///
+    /// In a one-shot stdio session that was a wart. In the long-lived server
+    /// this PR introduces it is user-visible: moving a breakpoint from line 12
+    /// to line 20 leaves line 12 live forever with no marker in the editor, and
+    /// every toggle adds another stale entry. `delete_all_breakpoints` already
+    /// exists on `DebugState` and is never called from the DAP path.
+    #[test]
+    fn set_breakpoints_replaces_the_previous_set_for_a_source() {
+        let mut debugger = attached_debugger();
+
+        set_breakpoint(&mut debugger, 1, 12);
+        assert_eq!(debugger.get_state().breakpoints.len(), 1);
+
+        // The developer drags the breakpoint down to line 20. VSCode re-sends
+        // the full list for the file, which is now just line 20.
+        set_breakpoint(&mut debugger, 2, 20);
+
+        let armed: Vec<usize> = debugger.get_state().breakpoints.keys().copied().collect();
+        assert_eq!(
+            armed.len(),
+            1,
+            "line 12 is still armed after being moved to line 20; breakpoint \
+             ids now registered: {armed:?}"
+        );
+    }
+}
