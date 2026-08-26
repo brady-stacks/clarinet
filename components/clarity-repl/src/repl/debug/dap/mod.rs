@@ -1263,6 +1263,8 @@ fn type_for_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     const CONTRACT: &str = "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.counter";
@@ -1272,6 +1274,12 @@ mod tests {
     /// state already built, standing in for a session that has completed
     /// `attach` and is receiving breakpoint configuration.
     fn attached_debugger() -> DAPDebugger {
+        attached_debugger_at(&PathBuf::from(SOURCE))
+    }
+
+    /// As `attached_debugger`, but registering the contract under `path` —
+    /// mirroring `run_dap_server`, which registers the *canonicalized* path.
+    fn attached_debugger_at(path: &Path) -> DAPDebugger {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1281,20 +1289,25 @@ mod tests {
         let mut debugger = DAPDebugger::from_io(rt, reader, writer, true);
 
         let contract_id = QualifiedContractIdentifier::parse(CONTRACT).unwrap();
-        let path = PathBuf::from(SOURCE);
         debugger
             .path_to_contract_id
-            .insert(path.clone(), contract_id.clone());
+            .insert(path.to_path_buf(), contract_id.clone());
         debugger
             .contract_id_to_path
-            .insert(contract_id.clone(), path);
+            .insert(contract_id.clone(), path.to_path_buf());
         debugger.state = Some(DebugState::new(&contract_id, ""));
         debugger
     }
 
     fn set_breakpoint(debugger: &mut DAPDebugger, seq: i64, line: u32) {
+        set_breakpoint_at(debugger, seq, SOURCE, line);
+    }
+
+    /// Send a `setBreakpoints` naming `source` — the path string the editor
+    /// sends, which need not be the one the server registered.
+    fn set_breakpoint_at(debugger: &mut DAPDebugger, seq: i64, source: &str, line: u32) {
         let arguments = serde_json::from_value(serde_json::json!({
-            "source": {"path": SOURCE},
+            "source": {"path": source},
             "breakpoints": [{"line": line}],
         }))
         .unwrap();
@@ -1380,6 +1393,41 @@ mod tests {
             ),
             (0, 0, 0),
             "frames, scopes and variables from the previous call are still cached"
+        );
+    }
+    /// Finding 10 of the PR #2483 review: `run_dap_server` canonicalizes
+    /// contract paths, and on Windows `std::fs::canonicalize` returns a
+    /// `\\?\`-prefixed extended-length path. `set_breakpoints` then does an
+    /// exact `PathBuf` lookup against the `source.path` VSCode sends
+    /// (`c:\proj\contracts\counter.clar`), which never matches — so every
+    /// breakpoint is rejected with "contract not found for path" and the feature
+    /// silently degrades to SDK-only behaviour.
+    ///
+    /// `run_dap` does not canonicalize, so the two modes resolve breakpoint
+    /// paths differently and both need a normalization helper that strips the
+    /// verbatim prefix. This is Windows-only: elsewhere `canonicalize` returns a
+    /// path that compares equal.
+    #[cfg(windows)]
+    #[test]
+    fn breakpoints_bind_when_the_registered_path_was_canonicalized() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("counter.clar");
+        std::fs::write(&source, "(define-data-var count uint u0)\n").unwrap();
+
+        // What `make_session` stores: the canonicalized path.
+        let canonical = std::fs::canonicalize(&source).unwrap();
+        let mut debugger = attached_debugger_at(&canonical);
+
+        // What the editor sends: the plain path, with no verbatim prefix.
+        set_breakpoint_at(&mut debugger, 1, source.to_str().unwrap(), 1);
+
+        let armed: Vec<usize> = debugger.get_state().breakpoints.keys().copied().collect();
+        assert_eq!(
+            armed.len(),
+            1,
+            "the breakpoint was rejected because the registered path \
+             ({canonical:?}) does not compare equal to the path the editor sent \
+             ({source:?})"
         );
     }
 }
