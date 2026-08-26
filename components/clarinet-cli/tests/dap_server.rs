@@ -146,6 +146,10 @@ impl SdkClient {
         }))
     }
 
+    fn mine_block(&mut self, txs: serde_json::Value) -> serde_json::Value {
+        self.request(serde_json::json!({"method": "mineBlock", "txs": txs}))
+    }
+
     /// `(get-count)` as a hex-encoded Clarity `uint`.
     fn count(&mut self) -> String {
         let response = self.call_read_only("counter", "get-count");
@@ -228,5 +232,32 @@ fn call_read_only_fn_does_not_commit_state() {
         clarity_uint(0),
         "callReadOnlyFn committed the state change from `increment`; \
          the server answered {response}"
+    );
+}
+
+/// Finding 20: `mineBlock` matches `"callPrivateFn"` alongside
+/// `"callPublicFn"` (`dap.rs`) and sends both through `call_contract`, which
+/// builds a `contract-call?`. A `define-private` function is not reachable that
+/// way, so the transaction type the SDK exposes cannot do what it claims —
+/// unlike the real `simnet.callPrivateFn`. The top-level proxy method has the
+/// same problem from the other direction: it sends `method: "callPublicFn"`
+/// (`syncDebugSimnet.ts`).
+#[test]
+fn mine_block_can_call_a_private_function() {
+    let mut server = DapServer::start();
+    let mut client = server.connect();
+
+    let response = client.mine_block(serde_json::json!([{
+        "type": "callPrivateFn",
+        "contract": "counter",
+        "function": "double",
+        "args": ["u21"],
+    }]));
+
+    let tx = &response["result"]["results"][0];
+    assert_eq!(
+        tx["result"].as_str(),
+        Some(clarity_uint(42).as_str()),
+        "`double` should have returned u42; the server answered {response}"
     );
 }
