@@ -215,3 +215,42 @@ fn set_breakpoints_rejects_a_source_without_a_path() {
         "expected a failure response naming the unsupported source, got {response}"
     );
 }
+
+/// Finding 3 of the PR #2483 review: `get_state()` is
+/// `self.state.as_mut().unwrap()`, but `state` stays `None` until `attach()`
+/// runs. `init_attach` processes whatever arrives first, so a `disconnect` —
+/// what VSCode sends when the user cancels a debug session before it is
+/// configured — reaches `quit()` and panics the handshake thread. `join()` then
+/// returns `Err` and `run_dap_server` exits 1 with "DAP handshake thread
+/// panicked".
+///
+/// `no_op()` pre-seeds `state`, but only for SDK-only mode;
+/// `from_std_tcp_stream` does not, so attach mode is unchanged. Seeding it in
+/// `from_io` would close this without touching either call site.
+#[test]
+fn a_disconnect_before_attach_does_not_panic() {
+    let mut editor = Editor::attach();
+
+    editor.send(serde_json::json!({
+        "seq": 1,
+        "type": "request",
+        "command": "initialize",
+        "arguments": {"adapterID": "clarinet"},
+    }));
+    editor.recv();
+
+    // The user cancels before breakpoints are configured, so `attach` — the only
+    // thing that builds the debug state — never runs.
+    editor.send(serde_json::json!({
+        "seq": 2,
+        "type": "request",
+        "command": "disconnect",
+        "arguments": {},
+    }));
+
+    let outcome = editor.wait_for_init_attach(Duration::from_secs(2));
+    assert!(
+        !matches!(outcome, Some(Err(_))),
+        "a `disconnect` before `attach` panicked the debugger: {outcome:?}"
+    );
+}
