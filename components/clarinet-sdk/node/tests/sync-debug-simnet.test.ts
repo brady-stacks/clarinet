@@ -12,7 +12,7 @@
 import { Worker } from "node:worker_threads";
 import { afterEach, expect, it } from "vitest";
 
-import { closeSyncSocket, connectSyncSocket } from "../src/syncDebugSocket";
+import { closeSyncSocket, connectSyncSocket, syncSend } from "../src/syncDebugSocket";
 import { createSyncDebugSimnet } from "../src/syncDebugSimnet";
 
 type SdkRequest = Record<string, unknown> & { id?: number; method?: string };
@@ -218,4 +218,31 @@ it("callPrivateFn tells the server it is a private call", async () => {
 
   const methods = (await server.requests()).map((request) => request.method);
   expect(methods).toContain("callPrivateFn");
+});
+
+/**
+ * Finding 11 of the PR #2483 review: `state` in `syncDebugSocket.ts` is module
+ * global and `connectSyncSocket` returns early whenever it is live
+ * (`if (state && !state.dead) return;`). A second call naming a *different*
+ * port is therefore a silent no-op that keeps talking to the first server.
+ *
+ * `initSimnet()` calls `connectSyncSocket(debugPort)` on every invocation with
+ * the comment "no-op if already connected", so a run that legitimately switches
+ * servers — a new CodeLens session on a fresh port while the old worker is
+ * still alive, which is easy because `closeSyncSocket()` is exported and never
+ * called — keeps driving the dead one.
+ */
+it("connectSyncSocket switches to a new port", async () => {
+  const first = await startMockServer({ mode: "labelled", label: "first" });
+  await connectSyncSocket(first.port);
+  expect(JSON.parse(syncSend({ id: 1, method: "ping" })).result.server).toBe("first");
+
+  const second = await startMockServer({ mode: "labelled", label: "second" });
+  await connectSyncSocket(second.port);
+
+  const answered = JSON.parse(syncSend({ id: 2, method: "ping" })).result.server;
+  expect(
+    answered,
+    `connectSyncSocket(${second.port}) was a no-op; requests still go to the server on ${first.port}`,
+  ).toBe("second");
 });
