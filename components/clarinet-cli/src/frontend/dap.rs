@@ -581,3 +581,42 @@ fn write_response(writer: &mut impl Write, response: &serde_json::Value) -> Resu
     writer.flush().map_err(|e| format!("flush error: {e}"))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Finding 14 of the PR #2483 review: `call_contract` resolves the same
+    /// input twice, through `resolve_contract_principal` (which builds the
+    /// `contract-call?` snippet) and `find_contract_id` (which tells the
+    /// debugger which contract the call belongs to). The two disagree for a
+    /// fully-qualified principal that is not in the contract map:
+    /// `resolve_contract_principal` echoes it back, while `find_contract_id`
+    /// falls through to `transient()`. The snippet and the debugger then target
+    /// different contracts.
+    ///
+    /// They should be one resolution, producing an
+    /// `Option<QualifiedContractIdentifier>` both values derive from.
+    #[test]
+    fn the_two_contract_resolvers_agree() {
+        let mut dap = DAPDebugger::no_op();
+        let known =
+            QualifiedContractIdentifier::parse("ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.counter")
+                .unwrap();
+        dap.contract_id_to_path
+            .insert(known.clone(), PathBuf::from("/tmp/counter.clar"));
+
+        // A well-formed principal that this project does not contain.
+        let unknown = "ST2CY5V39NHDPWSXMW9QDT3HC3GD6Q6XX4CFRK9AG.counter";
+
+        let snippet_target = resolve_contract_principal(&dap, unknown);
+        let debugger_target = find_contract_id(&dap, unknown);
+
+        assert_eq!(
+            snippet_target,
+            format!("'{debugger_target}"),
+            "the snippet and the debugger resolved `{unknown}` to different \
+             contracts"
+        );
+    }
+}
