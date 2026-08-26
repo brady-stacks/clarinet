@@ -1329,4 +1329,57 @@ mod tests {
              ids now registered: {armed:?}"
         );
     }
+    /// Finding 14 of the PR #2483 review: `prepare_for_call` resets execution
+    /// state but leaves `stack_frames`, `scopes` and `variables` populated. In a
+    /// one-shot stdio session the process exited after one call; the long-lived
+    /// server calls this once per contract call, so the caches only grow.
+    ///
+    /// Two consequences: stale frames from a finished call are still reachable,
+    /// and scope ids are derived as `frame.id * 1000 + n`, so a later call whose
+    /// frame reuses an id collides with the previous call's scopes — the editor
+    /// then shows variables from a call that has already returned.
+    #[test]
+    fn prepare_for_call_clears_the_frame_caches() {
+        let mut debugger = attached_debugger();
+        let contract_id = QualifiedContractIdentifier::parse(CONTRACT).unwrap();
+
+        // Stand in for the frames a completed call left behind.
+        let frame: StackFrame = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": "increment",
+            "line": 3,
+            "column": 0,
+        }))
+        .unwrap();
+        let scope: Scope = serde_json::from_value(serde_json::json!({
+            "name": "Locals",
+            "variablesReference": 1000,
+            "expensive": false,
+        }))
+        .unwrap();
+        let variable: Variable = serde_json::from_value(serde_json::json!({
+            "name": "count",
+            "value": "u1",
+            "variablesReference": 0,
+        }))
+        .unwrap();
+        debugger.stack_frames.insert(
+            FunctionIdentifier::new_user_function("increment", "counter"),
+            frame,
+        );
+        debugger.scopes.insert(1, vec![scope]);
+        debugger.variables.insert(1000, vec![variable]);
+
+        debugger.prepare_for_call(&contract_id, "(contract-call? .counter get-count)");
+
+        assert_eq!(
+            (
+                debugger.stack_frames.len(),
+                debugger.scopes.len(),
+                debugger.variables.len()
+            ),
+            (0, 0, 0),
+            "frames, scopes and variables from the previous call are still cached"
+        );
+    }
 }
