@@ -172,3 +172,31 @@ it("the debug proxy implements the whole Simnet surface", async () => {
     `initSimnet() presents this proxy as a Simnet, but ${absent.length} of its members are missing`,
   ).toEqual([]);
 });
+
+/**
+ * Finding 20 of the PR #2483 review: `collectReport` traded a crash for a wrong
+ * answer. It used to be absent, so `vitest.setup.ts` threw in `afterEach`; it
+ * now returns `{ coverage: "", costs: "" }`, which `vitest.setup.ts` pushes
+ * straight into the report arrays. A `--coverage` or `--costs` run under
+ * `CLARINET_DEBUG_PORT` writes an empty lcov, and a coverage gate reads that as
+ * 0% rather than "unsupported".
+ *
+ * Either fix is fine: throw a named error, or have the server implement it.
+ */
+it("collectReport does not silently return an empty report", async () => {
+  const { proxy } = await connectProxy();
+
+  let report: { coverage: string; costs: string };
+  try {
+    report = proxy.collectReport(false, "");
+  } catch (error) {
+    // Acceptable: the proxy says out loud that it cannot produce a report.
+    expect((error as Error).message).toMatch(/coverage|cost|report/i);
+    return;
+  }
+
+  expect(
+    report.coverage,
+    "an empty lcov reads as 0% coverage, not as an unsupported operation",
+  ).not.toBe("");
+});
