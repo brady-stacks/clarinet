@@ -254,3 +254,38 @@ fn a_disconnect_before_attach_does_not_panic() {
         "a `disconnect` before `attach` panicked the debugger: {outcome:?}"
     );
 }
+
+/// Finding 5 of the PR #2483 review: `threads()` sets `config_done` in attach
+/// mode, so the first `threads` request ends the configuration phase and
+/// releases `init_attach`.
+///
+/// The intended handshake is attach response → `initialized` event → one
+/// `setBreakpoints` per source file → `configurationDone`. A `threads` request
+/// interleaved anywhere in that sequence lets the eval loop start while
+/// `setBreakpoints` for the second or third contract is still in flight, so
+/// those breakpoints are registered after execution has already run past them.
+/// The result is an intermittent, timing-dependent "my breakpoint didn't hit".
+///
+/// Gating on `configurationDone` alone removes the race; the `threads` fallback
+/// is only load-bearing in launch mode.
+#[test]
+fn a_threads_request_does_not_end_the_configuration_phase() {
+    let mut editor = Editor::attach();
+    editor.handshake();
+
+    // VSCode asks for the thread list during configuration, before it has sent
+    // every `setBreakpoints`.
+    editor.send(serde_json::json!({
+        "seq": 3,
+        "type": "request",
+        "command": "threads",
+    }));
+    editor.recv();
+
+    let outcome = editor.wait_for_init_attach(Duration::from_secs(1));
+    assert!(
+        outcome.is_none(),
+        "`threads` released init_attach before `configurationDone`, so the eval \
+         loop can start while breakpoints are still being registered: {outcome:?}"
+    );
+}
