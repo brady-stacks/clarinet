@@ -18,12 +18,15 @@ use clarinet_lib::frontend::dap::run_dap_server;
 /// The fixture project every test runs against: one `counter` contract with a
 /// public function that mutates state and emits a `print` event, a read-only
 /// getter, and a private function.
-fn fixture_manifest() -> PathBuf {
+fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join("dap")
-        .join("Clarinet.toml")
+}
+
+fn fixture_manifest() -> PathBuf {
+    fixture_dir().join("Clarinet.toml")
 }
 
 /// Ask the OS for an unused port, then release it so the server can bind it.
@@ -259,5 +262,34 @@ fn mine_block_can_call_a_private_function() {
         tx["result"].as_str(),
         Some(clarity_uint(42).as_str()),
         "`double` should have returned u42; the server answered {response}"
+    );
+}
+
+/// Finding 21: `initSession` canonicalizes the requested `manifestPath` in the
+/// *server's* process and ignores the `cwd` the client sends alongside it
+/// (`syncDebugSimnet.ts` sends both). `initSimnet()`'s default manifest is the
+/// relative `"./Clarinet.toml"`, so it resolves against wherever `clarinet dap`
+/// was started rather than where the test runs, and the guard rejects a request
+/// that names the very manifest the server is already using.
+///
+/// The CodeLens flow only works because it happens to spawn the server with
+/// `cwd: projectRoot`; a server started anywhere else refuses every session.
+#[test]
+fn init_session_resolves_a_relative_manifest_against_the_client_cwd() {
+    let mut server = DapServer::start();
+    let mut client = server.connect();
+
+    // `<fixture>/./Clarinet.toml` is exactly the manifest the server loaded.
+    let response = client.request(serde_json::json!({
+        "method": "initSession",
+        "cwd": fixture_dir(),
+        "manifestPath": "./Clarinet.toml",
+    }));
+
+    assert!(
+        response["error"].is_null(),
+        "initSession rejected the manifest it is already using, because it \
+         resolved the relative path against its own cwd instead of the `cwd` \
+         the client sent: {response}"
     );
 }
