@@ -17,6 +17,8 @@ import { createSyncDebugSimnet } from "../src/syncDebugSimnet";
 
 type SdkRequest = Record<string, unknown> & { id?: number; method?: string };
 
+const ACCOUNTS_DEPLOYER = "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM";
+
 /**
  * Mock `clarinet dap` SDK server. Serialized and spawned with `eval: true`, the
  * same way `syncDebugSocket.ts` spawns its own worker, so this file stays
@@ -101,8 +103,9 @@ async function startMockServer(
   return {
     port: await promise,
     requests: async () => {
-      // Messages posted while the main thread was blocked drain on the next tick.
-      await new Promise((r) => setImmediate(r));
+      // Messages posted while the main thread was blocked in `Atomics.wait`
+      // only drain once it yields, so give the event loop a real turn.
+      await new Promise((r) => setTimeout(r, 50));
       return received;
     },
   };
@@ -199,4 +202,20 @@ it("collectReport does not silently return an empty report", async () => {
     report.coverage,
     "an empty lcov reads as 0% coverage, not as an unsupported operation",
   ).not.toBe("");
+});
+
+/**
+ * Finding 20 of the PR #2483 review: the proxy's `callPrivateFn` sends
+ * `method: "callPublicFn"`, so the server has no way to tell the two apart and
+ * routes it through an ordinary `contract-call?` — which cannot reach a
+ * `define-private` function at all. Under `CLARINET_DEBUG_PORT` an existing
+ * `simnet.callPrivateFn(...)` therefore fails with "has no public function".
+ */
+it("callPrivateFn tells the server it is a private call", async () => {
+  const { proxy, server } = await connectProxy();
+
+  proxy.callPrivateFn("counter", "double", [], ACCOUNTS_DEPLOYER);
+
+  const methods = (await server.requests()).map((request) => request.method);
+  expect(methods).toContain("callPrivateFn");
 });
