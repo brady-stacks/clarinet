@@ -41,18 +41,50 @@ fn free_port() -> u16 {
 /// A `run_dap_server` instance running on its own thread.
 struct DapServer {
     sdk_port: u16,
+    dap_port: Option<u16>,
     handle: Option<JoinHandle<Result<(), String>>>,
 }
 
 impl DapServer {
     /// Start the server in SDK-only mode (no DAP client).
     fn start() -> Self {
+        Self::start_with_dap_port(None)
+    }
+
+    /// Start the server in attach mode, listening for a DAP client too.
+    fn start_attach() -> Self {
+        Self::start_with_dap_port(Some(free_port()))
+    }
+
+    fn start_with_dap_port(dap_port: Option<u16>) -> Self {
         let sdk_port = free_port();
         let manifest = fixture_manifest();
-        let handle = std::thread::spawn(move || run_dap_server(None, sdk_port, manifest));
+        let handle = std::thread::spawn(move || run_dap_server(dap_port, sdk_port, manifest));
         DapServer {
             sdk_port,
+            dap_port,
             handle: Some(handle),
+        }
+    }
+
+    /// Connect to the DAP port, retrying until the server has bound it.
+    fn connect_dap(&mut self) -> TcpStream {
+        let port = self
+            .dap_port
+            .expect("server was started without a DAP port");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) {
+                return stream;
+            }
+            if let Some(result) = self.exit_result() {
+                panic!("the server exited before accepting a DAP client: {result:?}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "could not connect to the DAP port {port}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 
@@ -347,5 +379,36 @@ fn a_client_that_disconnects_before_reading_does_not_kill_the_server() {
     assert!(
         response["result"]["accounts"]["deployer"].is_string(),
         "the server survived but stopped answering: {response}"
+    );
+}
+
+/// Finding 27: the EOF fix turned `init_attach`'s busy-spin into a hard exit.
+/// `init_attach` returns `Err(ParseError::Eof)`, the handshake thread maps it to
+/// a `String`, and `??` propagates it out of `run_dap_server`. Because the join
+/// now happens *before* the SDK accept loop, an editor that connects and then
+/// closes — a cancelled debug session, an extension reload — kills the server
+/// before it ever accepts the test runner.
+///
+/// In the CodeLens flow the terminal command has already been queued with
+/// `CLARINET_DEBUG_PORT` pointing at a port that is about to close, so the
+/// developer sees `connectSyncSocket` fail while the real reason sits in the
+/// extension's output channel. Falling back to `DAPDebugger::no_op()` would
+/// degrade to SDK-only mode and keep the test run working.
+#[test]
+fn a_dap_client_disconnecting_mid_handshake_does_not_kill_the_server() {
+    let mut server = DapServer::start_attach();
+
+    // An editor attaches and then goes away without completing the handshake.
+    drop(server.connect_dap());
+
+    if let Some(result) = server.wait_for_exit(Duration::from_secs(5)) {
+        panic!("the server exited when the DAP client disconnected: {result:?}");
+    }
+
+    let mut client = server.connect();
+    let response = client.request(serde_json::json!({"method": "getAccounts"}));
+    assert!(
+        response["result"]["accounts"]["deployer"].is_string(),
+        "the server should have degraded to SDK-only mode: {response}"
     );
 }
