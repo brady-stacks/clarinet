@@ -75,6 +75,21 @@ impl DapServer {
         }
     }
 
+    /// Wait up to `timeout` for the server thread to return. `None` means it is
+    /// still running, which for most tests is the passing outcome.
+    fn wait_for_exit(&mut self, timeout: Duration) -> Option<Result<(), String>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(result) = self.exit_result() {
+                return Some(result);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     /// The server's return value if the thread has already finished, else `None`.
     /// Never blocks.
     fn exit_result(&mut self) -> Option<Result<(), String>> {
@@ -291,5 +306,46 @@ fn init_session_resolves_a_relative_manifest_against_the_client_cwd() {
         "initSession rejected the manifest it is already using, because it \
          resolved the relative path against its own cwd instead of the `cwd` \
          the client sent: {response}"
+    );
+}
+
+/// Finding 26: the read arm of the request loop was deliberately softened to
+/// log and `break 'request`, but every response still goes out through
+/// `write_response(&mut writer, &resp)?`, whose error propagates out of
+/// `run_dap_server` and takes the process down. A client that disappears
+/// between its request and the response — the common case when a Vitest worker
+/// times out or is killed — kills the server for every other client.
+///
+/// The `disconnect` arm already ignores write errors with
+/// `let _ = writeln!(...)`, so the file is inconsistent with itself.
+///
+/// The client below pipelines several requests in one write and then drops the
+/// socket without reading. The server answers the first request successfully,
+/// the peer's kernel resets the connection because data arrived for a closed
+/// socket, and the second `write_response` fails — while the remaining requests
+/// are already sitting in the server's `BufReader`, so it still has work to do.
+#[test]
+fn a_client_that_disconnects_before_reading_does_not_kill_the_server() {
+    let mut server = DapServer::start();
+
+    let pipelined = (1..=20)
+        .map(|id| format!(r#"{{"id":{id},"method":"getAccounts"}}"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    {
+        let mut abandoning = server.connect();
+        abandoning.send_raw(&pipelined);
+    } // dropped without ever reading a response
+
+    if let Some(result) = server.wait_for_exit(Duration::from_secs(5)) {
+        panic!("the server exited when a client stopped reading: {result:?}");
+    }
+
+    // The server should be back in its accept loop, serving the next client.
+    let mut next = server.connect();
+    let response = next.request(serde_json::json!({"method": "getAccounts"}));
+    assert!(
+        response["result"]["accounts"]["deployer"].is_string(),
+        "the server survived but stopped answering: {response}"
     );
 }
