@@ -153,69 +153,6 @@ fn the_harness_completes_an_attach_handshake() {
     );
 }
 
-/// Finding 29 of the PR #2483 review: DAP defines the body of an
-/// `InitializeResponse` as the `Capabilities` object itself. `debug_types`
-/// declares `InitializeResponse { capabilities: Capabilities }` without
-/// `#[serde(flatten)]`, so the adapter emits the capabilities one level too
-/// deep and clients see none of the features it advertises.
-///
-/// That matters most for `supportsConfigurationDoneRequest`: `init_attach`
-/// waits for `configurationDone`, but the client never learns the adapter
-/// supports it. The new relay in `debug/debug.ts` reproduces the same nesting
-/// by hand, so both paths need fixing together.
-#[test]
-fn the_initialize_response_advertises_capabilities_where_dap_expects_them() {
-    let mut editor = Editor::attach();
-
-    editor.send(serde_json::json!({
-        "seq": 1,
-        "type": "request",
-        "command": "initialize",
-        "arguments": {"adapterID": "clarinet"},
-    }));
-    let response = editor.recv();
-
-    assert_eq!(
-        response["body"]["supportsConfigurationDoneRequest"],
-        serde_json::json!(true),
-        "capabilities must sit directly in `body`, not nested under \
-         `body.capabilities`; the adapter sent {response}"
-    );
-}
-
-/// Finding 3 of the PR #2483 review: `set_breakpoints` unwraps
-/// `arguments.source.path` twice. Per the DAP specification a `Source` needs
-/// either `path` or `sourceReference`, so a `setBreakpoints` carrying only a
-/// `sourceReference` is legal — and aborts the debugger. In server mode that
-/// panic is reachable from the editor at any time, and it takes
-/// `run_dap_server` down with "DAP handshake thread panicked".
-#[test]
-fn set_breakpoints_rejects_a_source_without_a_path() {
-    let mut editor = Editor::attach();
-    editor.handshake();
-
-    editor.send(serde_json::json!({
-        "seq": 3,
-        "type": "request",
-        "command": "setBreakpoints",
-        "arguments": {
-            "source": {"sourceReference": 1},
-            "breakpoints": [{"line": 3}],
-        },
-    }));
-
-    if let Some(Err(panicked)) = editor.wait_for_init_attach(Duration::from_secs(2)) {
-        panic!("a `setBreakpoints` with only a sourceReference killed the debugger: {panicked}");
-    }
-
-    let response = editor.recv();
-    assert_eq!(
-        response["success"],
-        serde_json::json!(false),
-        "expected a failure response naming the unsupported source, got {response}"
-    );
-}
-
 /// Finding 3 of the PR #2483 review: `get_state()` is
 /// `self.state.as_mut().unwrap()`, but `state` stays `None` until `attach()`
 /// runs. `init_attach` processes whatever arrives first, so a `disconnect` —

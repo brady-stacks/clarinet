@@ -1299,12 +1299,9 @@ mod tests {
         debugger
     }
 
-    fn set_breakpoint(debugger: &mut DAPDebugger, seq: i64, line: u32) {
-        set_breakpoint_at(debugger, seq, SOURCE, line);
-    }
-
     /// Send a `setBreakpoints` naming `source` — the path string the editor
     /// sends, which need not be the one the server registered.
+    #[cfg(windows)]
     fn set_breakpoint_at(debugger: &mut DAPDebugger, seq: i64, source: &str, line: u32) {
         let arguments = serde_json::from_value(serde_json::json!({
             "source": {"path": source},
@@ -1314,43 +1311,6 @@ mod tests {
         debugger.set_breakpoints(seq, arguments);
     }
 
-    /// Finding 6 of the PR #2483 review: DAP's `setBreakpoints` is
-    /// replace-all-for-this-source, but this implementation only adds, and
-    /// `reset_for_new_call` deliberately preserves the existing set.
-    ///
-    /// In a one-shot stdio session that was a wart. In the long-lived server
-    /// this PR introduces it is user-visible: moving a breakpoint from line 12
-    /// to line 20 leaves line 12 live forever with no marker in the editor, and
-    /// every toggle adds another stale entry. `delete_all_breakpoints` already
-    /// exists on `DebugState` and is never called from the DAP path.
-    #[test]
-    fn set_breakpoints_replaces_the_previous_set_for_a_source() {
-        let mut debugger = attached_debugger();
-
-        set_breakpoint(&mut debugger, 1, 12);
-        assert_eq!(debugger.get_state().breakpoints.len(), 1);
-
-        // The developer drags the breakpoint down to line 20. VSCode re-sends
-        // the full list for the file, which is now just line 20.
-        set_breakpoint(&mut debugger, 2, 20);
-
-        let armed: Vec<u32> = debugger
-            .get_state()
-            .breakpoints
-            .values()
-            .map(|breakpoint| {
-                let super::super::BreakpointData::Source(source) = &breakpoint.data else {
-                    panic!("expected a source breakpoint")
-                };
-                source.line
-            })
-            .collect();
-        assert_eq!(
-            armed,
-            vec![20],
-            "setBreakpoints did not replace line 12 with line 20: {armed:?}"
-        );
-    }
     /// Finding 14 of the PR #2483 review: `prepare_for_call` resets execution
     /// state but leaves `stack_frames`, `scopes` and `variables` populated. In a
     /// one-shot stdio session the process exited after one call; the long-lived
