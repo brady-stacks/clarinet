@@ -130,13 +130,36 @@ impl SdkClient {
     }
 
     fn call_public(&mut self, contract: &str, function: &str) -> serde_json::Value {
+        self.call(contract, function, "callPublicFn")
+    }
+
+    fn call_read_only(&mut self, contract: &str, function: &str) -> serde_json::Value {
+        self.call(contract, function, "callReadOnlyFn")
+    }
+
+    fn call(&mut self, contract: &str, function: &str, method: &str) -> serde_json::Value {
         self.request(serde_json::json!({
-            "method": "callPublicFn",
+            "method": method,
             "contract": contract,
             "function": function,
             "args": [],
         }))
     }
+
+    /// `(get-count)` as a hex-encoded Clarity `uint`.
+    fn count(&mut self) -> String {
+        let response = self.call_read_only("counter", "get-count");
+        response["result"]["result"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no result in {response}"))
+            .to_string()
+    }
+}
+
+/// A Clarity `uint` as the server hex-encodes it: type byte `0x01` followed by
+/// a 16-byte big-endian value.
+fn clarity_uint(value: u128) -> String {
+    format!("0x01{:032x}", value)
 }
 
 /// Smoke test: the harness can start the server and complete a round trip.
@@ -181,5 +204,29 @@ fn a_contract_call_reports_the_events_it_emitted() {
         events.as_array().map(Vec::len),
         Some(1),
         "expected the print event emitted by `increment`, got {events}"
+    );
+}
+
+/// Finding 9: `dap.rs` routes `"callReadOnlyFn"` to the same `call_contract` as
+/// `"callPublicFn"`, so the call emits an ordinary `contract-call?` and commits
+/// whatever it did. Nothing checks the function's declared type, so a
+/// state-mutating public function invoked through `simnet.callReadOnlyFn` — the
+/// form existing tests use to assert *without* mutating — changes the chain.
+#[test]
+fn call_read_only_fn_does_not_commit_state() {
+    let mut server = DapServer::start();
+    let mut client = server.connect();
+
+    assert_eq!(client.count(), clarity_uint(0), "the fixture starts at u0");
+
+    // `increment` is `define-public` and mutates `count`. Reaching it through
+    // callReadOnlyFn should be refused, or at minimum leave no trace.
+    let response = client.call_read_only("counter", "increment");
+
+    assert_eq!(
+        client.count(),
+        clarity_uint(0),
+        "callReadOnlyFn committed the state change from `increment`; \
+         the server answered {response}"
     );
 }
