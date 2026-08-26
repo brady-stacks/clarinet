@@ -14,6 +14,7 @@ import { afterEach, expect, it } from "vitest";
 
 import { closeSyncSocket, connectSyncSocket, syncSend } from "../src/syncDebugSocket";
 import { createSyncDebugSimnet } from "../src/syncDebugSimnet";
+import { initSimnet } from "../src/index";
 
 type SdkRequest = Record<string, unknown> & { id?: number; method?: string };
 
@@ -131,6 +132,7 @@ async function connectProxy(options?: {
 }
 
 afterEach(async () => {
+  delete process.env["CLARINET_DEBUG_PORT"];
   closeSyncSocket();
   await Promise.all(workers.splice(0).map((worker) => worker.terminate()));
 });
@@ -282,4 +284,40 @@ it("syncSend returns the response matching its request id", async () => {
     response,
     "a stale reply sharing the chunk was returned instead of this request's own",
   ).toMatchObject({ id: 7, result: { server: "fresh" } });
+});
+
+/**
+ * Finding 21 of the PR #2483 review: the debug branch in `index.ts` returns
+ * before it ever reaches `getSDK(options)`, so `trackCosts`, `trackCoverage`,
+ * `trackPerformance`, `performanceCostField` and `apiUrl` are all silently
+ * dropped. `apiUrl` matters most — a remote-data test keeps passing while
+ * pointing at whatever the server was started against — and `trackCosts` /
+ * `trackCoverage` compound the `collectReport` problem above.
+ *
+ * Either fix satisfies this: forward the options to the server, or reject the
+ * ones debug mode cannot honour.
+ */
+it("initSimnet honours or rejects its options in debug mode", async () => {
+  const server = await startMockServer();
+  process.env["CLARINET_DEBUG_PORT"] = String(server.port);
+
+  try {
+    await initSimnet("./Clarinet.toml", true, {
+      trackCosts: true,
+      trackCoverage: true,
+      apiUrl: "http://example.invalid/",
+    });
+  } catch (error) {
+    // Acceptable: debug mode says which options it cannot honour.
+    expect((error as Error).message).toMatch(/option|trackCosts|trackCoverage|apiUrl/i);
+    return;
+  }
+
+  const initSession = (await server.requests()).find(
+    (request) => request.method === "initSession",
+  );
+  expect(
+    initSession,
+    "initSession went to the server with no trace of the options initSimnet was given",
+  ).toMatchObject({ apiUrl: "http://example.invalid/" });
 });
