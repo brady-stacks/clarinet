@@ -736,19 +736,35 @@ pub async fn generate_default_deployment_with_cache(
 
     // Build the ASTs / DependencySet for requirements - step required for Simnet/Devnet/Testnet/Mainnet
     {
-        let requirements = &manifest.project.requirements;
+        let address_map = &manifest.project.address_map;
         let mut emulated_contracts_publish = HashMap::new();
         let mut requirements_publish = HashMap::new();
+
+        // Set of contract IDs that already exist at a network-specific address.
+        // For testnet, when entry.testnet differs from entry.contract_id we skip
+        // creating a RequirementPublish — the identifier is rewritten in source
+        // text at broadcast time instead.
+        let skip_redeploy_on_testnet: HashSet<QualifiedContractIdentifier> = address_map
+            .iter()
+            .filter_map(|entry| {
+                let testnet = entry.testnet.as_ref()?;
+                if testnet != &entry.contract_id {
+                    QualifiedContractIdentifier::parse(&entry.contract_id).ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         // Automatically add sbtc-deposit when sbtc-token is referenced (either
         // explicitly or auto-detected) but sbtc-deposit is not.
         let sbtc_token_str = SBTC_TOKEN_MAINNET_ADDRESS.to_string();
         let sbtc_deposit_str = SBTC_DEPOSIT_MAINNET_ADDRESS.to_string();
-        let has_sbtc_token = requirements.iter().any(|r| r.contract_id == sbtc_token_str)
+        let has_sbtc_token = address_map.iter().any(|r| r.contract_id == sbtc_token_str)
             || auto_detected
                 .iter()
                 .any(|id| id.to_string() == sbtc_token_str);
-        let has_sbtc_deposit = requirements
+        let has_sbtc_deposit = address_map
             .iter()
             .any(|r| r.contract_id == sbtc_deposit_str)
             || auto_detected
@@ -758,8 +774,8 @@ pub async fn generate_default_deployment_with_cache(
             queue.push_front(QualifiedContractIdentifier::parse(&sbtc_deposit_str).unwrap());
         }
 
-        // Seed queue with auto-detected deps not already in the explicit requirements.
-        let explicit_ids: HashSet<QualifiedContractIdentifier> = requirements
+        // Seed queue with auto-detected deps not already in the explicit address_map.
+        let explicit_ids: HashSet<QualifiedContractIdentifier> = address_map
             .iter()
             .filter_map(|e| QualifiedContractIdentifier::parse(&e.contract_id).ok())
             .collect();
@@ -771,12 +787,12 @@ pub async fn generate_default_deployment_with_cache(
             }
         }
 
-        // Push explicit requirements to front of queue (highest priority).
-        for entry in requirements.iter().rev() {
+        // Push explicit address_map entries to front of queue (highest priority).
+        for entry in address_map.iter().rev() {
             let contract_id =
                 QualifiedContractIdentifier::parse(&entry.contract_id).map_err(|_| {
                     format!(
-                        "malformatted contract_id in requirements: {}",
+                        "malformatted contract_id in address_map: {}",
                         entry.contract_id
                     )
                 })?;
@@ -834,30 +850,38 @@ pub async fn generate_default_deployment_with_cache(
                         };
                         requirements_publish.insert(contract_id.clone(), data);
                     } else if matches!(network, StacksNetwork::Testnet) {
-                        let mut remap_sender = default_deployer_address.clone();
-                        let mut remap_principals = BTreeMap::new();
-                        remap_principals
-                            .insert(contract_id.issuer.clone(), default_deployer_address.clone());
-
-                        // Remap sBTC mainnet address to testnet address
-                        if contract_id.issuer.to_string() == SBTC_MAINNET_ADDRESS {
-                            remap_sender = SBTC_TESTNET_ADDRESS_PRINCIPAL.clone();
+                        // If this contract has a network-specific testnet address
+                        // in the address_map, skip creating a RequirementPublish —
+                        // the identifier will be rewritten in source text at
+                        // broadcast time via contracts_ids_to_remap.
+                        if !skip_redeploy_on_testnet.contains(&contract_id) {
+                            let mut remap_sender = default_deployer_address.clone();
+                            let mut remap_principals = BTreeMap::new();
                             remap_principals.insert(
                                 contract_id.issuer.clone(),
-                                SBTC_TESTNET_ADDRESS_PRINCIPAL.clone(),
+                                default_deployer_address.clone(),
                             );
-                        }
 
-                        let data = RequirementPublishSpecification {
-                            contract_id: contract_id.clone(),
-                            remap_sender,
-                            source: source.clone(),
-                            location: contract_location,
-                            cost: deployment_fee_rate * source.len() as u64,
-                            remap_principals,
-                            clarity_version,
-                        };
-                        requirements_publish.insert(contract_id.clone(), data);
+                            // Remap sBTC mainnet address to testnet address
+                            if contract_id.issuer.to_string() == SBTC_MAINNET_ADDRESS {
+                                remap_sender = SBTC_TESTNET_ADDRESS_PRINCIPAL.clone();
+                                remap_principals.insert(
+                                    contract_id.issuer.clone(),
+                                    SBTC_TESTNET_ADDRESS_PRINCIPAL.clone(),
+                                );
+                            }
+
+                            let data = RequirementPublishSpecification {
+                                contract_id: contract_id.clone(),
+                                remap_sender,
+                                source: source.clone(),
+                                location: contract_location,
+                                cost: deployment_fee_rate * source.len() as u64,
+                                remap_principals,
+                                clarity_version,
+                            };
+                            requirements_publish.insert(contract_id.clone(), data);
+                        }
                     }
 
                     // Compute the AST
@@ -1309,6 +1333,7 @@ pub async fn generate_default_deployment_with_cache(
         },
         plan: TransactionPlanSpecification { batches },
         contracts: contracts_map,
+        address_map: manifest.project.address_map.clone(),
     };
 
     // Check for custom boot contract validation errors and return error if any
@@ -1716,6 +1741,7 @@ mod tests {
                     epoch: Some(EpochSpec::Epoch2_4),
                 }],
             },
+            address_map: vec![],
         };
 
         update_session_with_deployment_plan(&mut session, &deployment, None)

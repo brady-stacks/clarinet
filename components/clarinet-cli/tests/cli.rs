@@ -186,7 +186,7 @@ fn test_requirement_add() {
     let manifest = parse_manifest(&project_path);
     let found = manifest
         .project
-        .requirements
+        .address_map
         .iter()
         .any(|c| c.contract_id == requirement_name);
     assert!(found, "Requirement not found in manifest");

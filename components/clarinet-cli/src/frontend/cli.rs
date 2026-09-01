@@ -1106,6 +1106,7 @@ pub fn main() {
                     contracts_to_add: HashMap::new(),
                     requirements_to_add: vec![RequirementConfig {
                         contract_id: cmd.contract_id,
+                        ..Default::default()
                     }],
                 };
                 if !execute_changes(vec![Changes::EditTOML(change)]) {
@@ -2037,7 +2038,7 @@ fn load_manifest(location: &Path) -> Option<DocumentMut> {
 /// Edit a TOML document directly, preserving comments and structure.
 fn edit_toml_document(mut doc: DocumentMut, options: &mut TOMLEdition) -> DocumentMut {
     for req in options.requirements_to_add.drain(..) {
-        add_requirement_to_doc(&mut doc, &req.contract_id);
+        add_address_map_entry_to_doc(&mut doc, &req.contract_id);
     }
 
     for (name, contract) in options.contracts_to_add.drain() {
@@ -2051,8 +2052,11 @@ fn edit_toml_document(mut doc: DocumentMut, options: &mut TOMLEdition) -> Docume
     doc
 }
 
-/// Add an entry to the [[project.requirements]] array in the document.
-fn add_requirement_to_doc(doc: &mut DocumentMut, contract_id: &str) {
+/// Add an entry to the [[project.address_map]] array in the document.
+/// If an existing `requirements = []` inline array is found it is promoted to
+/// an array-of-tables first; entries already in either `requirements` or
+/// `address_map` are not duplicated.
+fn add_address_map_entry_to_doc(doc: &mut DocumentMut, contract_id: &str) {
     use toml_edit::{ArrayOfTables, Item, Table};
 
     // Ensure [project] table exists
@@ -2062,31 +2066,45 @@ fn add_requirement_to_doc(doc: &mut DocumentMut, contract_id: &str) {
         .as_table_mut()
         .expect("[project] should be a table");
 
-    // Ensure [[project.requirements]] array exists.
-    // If requirements = [] (an empty inline array), replace it with an array of tables.
-    if project
+    // Check for the contract_id in the existing [[project.requirements]] section
+    // so that we don't create a duplicate when migrating a legacy project.
+    let already_in_requirements = project
         .get("requirements")
-        .is_some_and(|v| v.as_array().is_some_and(|a| a.is_empty()))
-    {
-        project["requirements"] = Item::ArrayOfTables(ArrayOfTables::new());
+        .and_then(|v| v.as_array_of_tables())
+        .is_some_and(|arr| {
+            arr.iter()
+                .filter_map(|entry| entry.get("contract_id")?.as_str())
+                .any(|id| id == contract_id)
+        });
+    if already_in_requirements {
+        return;
     }
 
-    let requirements = project
-        .entry("requirements")
+    // Ensure [[project.address_map]] array exists.
+    // If address_map = [] (an empty inline array), promote it to an array of tables.
+    if project
+        .get("address_map")
+        .is_some_and(|v| v.as_array().is_some_and(|a| a.is_empty()))
+    {
+        project["address_map"] = Item::ArrayOfTables(ArrayOfTables::new());
+    }
+
+    let address_map = project
+        .entry("address_map")
         .or_insert(Item::ArrayOfTables(ArrayOfTables::new()))
         .as_array_of_tables_mut()
-        .expect("[[project.requirements]] should be an array of tables");
+        .expect("[[project.address_map]] should be an array of tables");
 
-    // Check for duplicates
-    let already_exists = requirements
+    // Check for duplicates within address_map itself.
+    let already_in_address_map = address_map
         .iter()
         .filter_map(|entry| entry.get("contract_id")?.as_str())
         .any(|id| id == contract_id);
 
-    if !already_exists {
+    if !already_in_address_map {
         let mut new_entry = Table::new();
         new_entry["contract_id"] = toml_edit::value(contract_id);
-        requirements.push(new_entry);
+        address_map.push(new_entry);
     }
 }
 
@@ -2509,24 +2527,24 @@ mod tests {
             false
         }
 
-        /// Helper to check if a requirement exists in the TOML
+        /// Helper to check if a requirement exists in either [[project.requirements]]
+        /// or [[project.address_map]] sections of the TOML.
         fn has_requirement(content: &str, contract_id: &str) -> bool {
             let doc: DocumentMut = content.parse().expect("Failed to parse TOML");
             let Some(project) = doc.get("project").and_then(|p| p.as_table()) else {
                 return false;
             };
-            if let Some(arr) = project
-                .get("requirements")
-                .and_then(|v| v.as_array_of_tables())
-            {
-                if arr.iter().any(|entry| {
-                    entry
-                        .get("contract_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == contract_id)
-                        .unwrap_or(false)
-                }) {
-                    return true;
+            for key in ["requirements", "address_map"] {
+                if let Some(arr) = project.get(key).and_then(|v| v.as_array_of_tables()) {
+                    if arr.iter().any(|entry| {
+                        entry
+                            .get("contract_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == contract_id)
+                            .unwrap_or(false)
+                    }) {
+                        return true;
+                    }
                 }
             }
             false
@@ -2633,6 +2651,7 @@ mod tests {
 
         #[test]
         fn test_add_requirement_preserves_comments() {
+            // New entries go to [[project.address_map]].
             let input = indoc! {r#"
                 [project]
                 name = "test-project"
@@ -2649,20 +2668,20 @@ mod tests {
             "#};
 
             let mut doc: DocumentMut = input.parse().expect("Failed to parse TOML");
-            add_requirement_to_doc(
+            add_address_map_entry_to_doc(
                 &mut doc,
                 "SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.nft-trait",
             );
 
             let output = doc.to_string();
 
-            // Verify the requirement was added
+            // Verify the requirement was added (found in address_map)
             assert!(
                 has_requirement(
                     &output,
                     "SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.nft-trait"
                 ),
-                "Requirement should be added"
+                "Requirement should be added to address_map"
             );
 
             // Verify comment is preserved
@@ -2689,15 +2708,16 @@ mod tests {
         }
 
         #[test]
-        fn test_add_requirement_with_empty_requirements_array() {
+        fn test_add_requirement_with_empty_address_map_array() {
+            // When address_map = [] exists it is promoted to an array-of-tables.
             let input = indoc! {r#"
                 [project]
                 name = 'project-template'
-                requirements = []
+                address_map = []
             "#};
 
             let mut doc: DocumentMut = input.parse().expect("Failed to parse TOML");
-            add_requirement_to_doc(
+            add_address_map_entry_to_doc(
                 &mut doc,
                 "SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.nft-trait",
             );
@@ -2709,9 +2729,8 @@ mod tests {
                     &output,
                     "SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.nft-trait"
                 ),
-                "Requirement should be added when requirements was an empty array"
+                "Requirement should be added when address_map was an empty inline array"
             );
-
             assert!(
                 has_toml_value(&output, "project.name", "project-template"),
                 "Project name should be preserved"
@@ -2719,7 +2738,10 @@ mod tests {
         }
 
         #[test]
-        fn test_add_requirement_does_not_duplicate() {
+        fn test_add_requirement_does_not_duplicate_in_requirements() {
+            // If the contract_id is already listed under [[project.requirements]],
+            // calling add_address_map_entry_to_doc must NOT add a duplicate entry
+            // in [[project.address_map]].
             let input = indoc! {r#"
                 [project]
                 name = "test-project"
@@ -2729,22 +2751,44 @@ mod tests {
             "#};
 
             let mut doc: DocumentMut = input.parse().expect("Failed to parse TOML");
-
-            // Try to add the same requirement again
-            add_requirement_to_doc(
+            add_address_map_entry_to_doc(
                 &mut doc,
                 "SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.nft-trait",
             );
 
             let output = doc.to_string();
 
-            // Count how many times the contract_id appears
+            // nft-trait should appear exactly once across both sections.
+            let count = output.matches("nft-trait").count();
+            assert_eq!(count, 1, "Requirement should not be duplicated");
+        }
+
+        #[test]
+        fn test_add_requirement_does_not_duplicate_in_address_map() {
+            // Duplicate within [[project.address_map]] itself.
+            let input = indoc! {r#"
+                [project]
+                name = "test-project"
+
+                [[project.address_map]]
+                contract_id = "SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.nft-trait"
+            "#};
+
+            let mut doc: DocumentMut = input.parse().expect("Failed to parse TOML");
+            add_address_map_entry_to_doc(
+                &mut doc,
+                "SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.nft-trait",
+            );
+
+            let output = doc.to_string();
+
             let count = output.matches("nft-trait").count();
             assert_eq!(count, 1, "Requirement should not be duplicated");
         }
 
         #[test]
         fn test_add_multiple_requirements() {
+            // Legacy entry in requirements + new entry written to address_map.
             let input = indoc! {r#"
                 [project]
                 name = "test-project"
@@ -2754,27 +2798,27 @@ mod tests {
             "#};
 
             let mut doc: DocumentMut = input.parse().expect("Failed to parse TOML");
-            add_requirement_to_doc(
+            add_address_map_entry_to_doc(
                 &mut doc,
                 "SP3K8BC0PPEVCV7NZ6QSRWPQ2JE9E5B6N3PA0KBR9.another-trait",
             );
 
             let output = doc.to_string();
 
-            // Both requirements should exist
+            // Both should be found by has_requirement (searching both sections).
             assert!(
                 has_requirement(
                     &output,
                     "SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.nft-trait"
                 ),
-                "Original requirement should be preserved"
+                "Original requirement in [[project.requirements]] should still be present"
             );
             assert!(
                 has_requirement(
                     &output,
                     "SP3K8BC0PPEVCV7NZ6QSRWPQ2JE9E5B6N3PA0KBR9.another-trait"
                 ),
-                "New requirement should be added"
+                "New requirement should be added to [[project.address_map]]"
             );
         }
 
