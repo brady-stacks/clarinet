@@ -33,6 +33,29 @@ mod bitcoin_deployment;
 
 use crate::types::{DeploymentSpecification, EpochSpec, TransactionSpecification};
 
+/// Build the set of `(canonical_id, network_id)` remaps contributed by the
+/// user's `[[project.address_map]]` for `network`.
+///
+/// Only entries where the network-specific override differs from the canonical
+/// `contract_id` produce a remap; identical values and `Simnet` are skipped.
+fn address_map_remaps(deployment: &DeploymentSpecification) -> HashSet<(String, String)> {
+    let mut remaps = HashSet::new();
+    for entry in &deployment.address_map {
+        let override_id = match &deployment.network {
+            StacksNetwork::Devnet => entry.devnet.as_deref(),
+            StacksNetwork::Testnet => entry.testnet.as_deref(),
+            StacksNetwork::Mainnet => entry.mainnet.as_deref(),
+            StacksNetwork::Simnet => continue,
+        };
+        if let Some(override_id) = override_id {
+            if override_id != entry.contract_id {
+                remaps.insert((entry.contract_id.clone(), override_id.to_string()));
+            }
+        }
+    }
+    remaps
+}
+
 /// Return the initial contract-ID remappings for `network`.
 /// Devnet sBTC mappings are added later from its requirement transactions.
 fn boot_contract_ids_to_remap(network: &StacksNetwork) -> HashSet<(String, String)> {
@@ -375,6 +398,10 @@ pub fn apply_on_chain_deployment(
         btc_accounts_lookup.insert(account.btc_address.clone(), account);
     }
 
+    // Compute remaps before any partial moves of `deployment`.
+    let mut contracts_ids_to_remap = boot_contract_ids_to_remap(&deployment.network);
+    contracts_ids_to_remap.extend(address_map_remaps(&deployment));
+
     let stacks_node_url = if let Some(url) = override_stacks_rpc_url {
         url
     } else {
@@ -398,25 +425,6 @@ pub fn apply_on_chain_deployment(
     // Using a session to encode + coerce/check (todo) contract calls arguments.
     let mut session = Session::new(SessionSettings::default());
     let mut index = 0;
-    let mut contracts_ids_to_remap = boot_contract_ids_to_remap(&deployment.network);
-
-    // Apply user-defined per-network address remaps from Clarinet.toml address_map.
-    // When a network-specific override differs from the canonical contract_id,
-    // Clarinet rewrites contract identifier strings in source text at broadcast
-    // time rather than re-deploying the contract from scratch.
-    for entry in &deployment.address_map {
-        let override_id = match &deployment.network {
-            StacksNetwork::Devnet => entry.devnet.as_deref(),
-            StacksNetwork::Testnet => entry.testnet.as_deref(),
-            StacksNetwork::Mainnet => entry.mainnet.as_deref(),
-            StacksNetwork::Simnet => continue,
-        };
-        if let Some(override_id) = override_id {
-            if override_id != entry.contract_id {
-                contracts_ids_to_remap.insert((entry.contract_id.clone(), override_id.to_string()));
-            }
-        }
-    }
 
     for batch_spec in deployment.plan.batches.iter() {
         let epoch = batch_spec.epoch.unwrap_or(DEFAULT_EPOCH.into());
@@ -1118,6 +1126,118 @@ mod tests {
                 .filter(|(old, _)| *old == source_id)
                 .count(),
             1
+        );
+    }
+
+    // --- address_map_remaps unit tests ---
+
+    fn make_spec_with_address_map(
+        network: StacksNetwork,
+        entries: Vec<clarinet_files::AddressMapEntry>,
+    ) -> DeploymentSpecification {
+        use std::collections::BTreeMap;
+
+        use crate::types::TransactionPlanSpecification;
+        DeploymentSpecification {
+            id: 0,
+            name: "test".into(),
+            network,
+            stacks_node: None,
+            bitcoin_node: None,
+            genesis: None,
+            plan: TransactionPlanSpecification { batches: vec![] },
+            contracts: BTreeMap::new(),
+            address_map: entries,
+        }
+    }
+
+    #[test]
+    fn address_map_remaps_devnet_override() {
+        let spec = make_spec_with_address_map(
+            StacksNetwork::Devnet,
+            vec![clarinet_files::AddressMapEntry {
+                contract_id: "SP2ABC.token".into(),
+                devnet: Some("ST1DEV.token".into()),
+                testnet: None,
+                mainnet: None,
+            }],
+        );
+        let remaps = address_map_remaps(&spec);
+        assert!(
+            remaps.contains(&("SP2ABC.token".into(), "ST1DEV.token".into())),
+            "devnet override should produce a remap"
+        );
+        assert_eq!(remaps.len(), 1);
+    }
+
+    #[test]
+    fn address_map_remaps_mainnet_override() {
+        let spec = make_spec_with_address_map(
+            StacksNetwork::Mainnet,
+            vec![clarinet_files::AddressMapEntry {
+                contract_id: "SP2ABC.token".into(),
+                devnet: None,
+                testnet: None,
+                mainnet: Some("SP3REAL.token".into()),
+            }],
+        );
+        let remaps = address_map_remaps(&spec);
+        assert!(
+            remaps.contains(&("SP2ABC.token".into(), "SP3REAL.token".into())),
+            "mainnet override should produce a remap"
+        );
+    }
+
+    #[test]
+    fn address_map_remaps_skips_simnet() {
+        let spec = make_spec_with_address_map(
+            StacksNetwork::Simnet,
+            vec![clarinet_files::AddressMapEntry {
+                contract_id: "SP2ABC.token".into(),
+                devnet: Some("ST1DEV.token".into()),
+                testnet: Some("ST1TEST.token".into()),
+                mainnet: Some("SP2MAIN.token".into()),
+            }],
+        );
+        let remaps = address_map_remaps(&spec);
+        assert!(remaps.is_empty(), "simnet entries should produce no remaps");
+    }
+
+    #[test]
+    fn address_map_remaps_skips_same_address() {
+        let spec = make_spec_with_address_map(
+            StacksNetwork::Testnet,
+            vec![clarinet_files::AddressMapEntry {
+                contract_id: "SP2ABC.token".into(),
+                devnet: None,
+                // Same as contract_id — no remap needed.
+                testnet: Some("SP2ABC.token".into()),
+                mainnet: None,
+            }],
+        );
+        let remaps = address_map_remaps(&spec);
+        assert!(
+            remaps.is_empty(),
+            "override equal to contract_id should not produce a remap"
+        );
+    }
+
+    #[test]
+    fn address_map_remaps_no_override_for_network() {
+        // Entry has devnet override but we're on testnet — no remap.
+        let spec = make_spec_with_address_map(
+            StacksNetwork::Testnet,
+            vec![clarinet_files::AddressMapEntry {
+                contract_id: "SP2ABC.token".into(),
+                devnet: Some("ST1DEV.token".into()),
+                testnet: None,
+                mainnet: None,
+            }],
+        );
+        let remaps = address_map_remaps(&spec);
+        assert!(
+            remaps.is_empty(),
+            "an override for a different network should not produce a remap"
         );
     }
 }

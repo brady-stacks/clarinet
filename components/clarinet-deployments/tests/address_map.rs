@@ -93,7 +93,10 @@ async fn testnet_address_map_override_skips_redeploy() {
     )
     .unwrap();
 
-    // The source is still fetched to build the AST for dependency detection.
+    // Even though the contract is not re-deployed, its source is still fetched
+    // so Clarinet can build the AST and detect any transitive dependencies.
+    // This is intentional - skip-redeploy only suppresses the RequirementPublish
+    // transaction; the source analysis still happens.
     let server = mock_contract(EXTERNAL_DEPLOYER, "nft-trait").await;
 
     let manifest = ProjectManifest::from_location(&root.join("Clarinet.toml"), false).unwrap();
