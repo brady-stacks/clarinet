@@ -125,6 +125,9 @@ enum Command {
     /// Step by step debugging and breakpoints from your code editor (VSCode, vim, emacs, etc)
     #[clap(name = "dap", bin_name = "dap")]
     DAP,
+    /// Replay a mainnet (or testnet) transaction using Mainnet Execution Simulation (MXS)
+    #[clap(name = "replay", bin_name = "replay")]
+    Replay(Replay),
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -497,6 +500,22 @@ struct Console {
     /// Initial remote Stacks block height
     #[clap(long = "remote-data-initial-height", short = 'b')]
     pub remote_data_initial_height: Option<u32>,
+}
+
+#[derive(Parser, PartialEq, Clone, Debug)]
+struct Replay {
+    /// Transaction ID to replay (with or without 0x prefix)
+    #[clap(long = "txid")]
+    pub txid: String,
+    /// Stacks API URL (defaults to mainnet)
+    #[clap(long = "api-url", default_value = "https://api.hiro.so")]
+    pub api_url: ApiUrl,
+    /// Override the block height at which to initialize the MXS session
+    #[clap(long = "block-height")]
+    pub block_height: Option<u32>,
+    /// Path to a local cache directory for remote contract metadata
+    #[clap(long = "cache-path")]
+    pub cache_path: Option<PathBuf>,
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -1513,6 +1532,37 @@ pub fn main() {
                         eprintln!("  {file}");
                     }
                     std::process::exit(1);
+                }
+            }
+        }
+        Command::Replay(cmd) => {
+            println!("Fetching transaction {}...", cmd.txid);
+            match repl::replay::replay_transaction(
+                cmd.api_url,
+                &cmd.txid,
+                cmd.block_height,
+                cmd.cache_path,
+            ) {
+                Ok(result) => {
+                    println!();
+                    println!("Type:    {}", result.tx_type);
+                    println!("Sender:  {}", result.sender);
+                    println!(
+                        "Block:   {} (session initialized at {})",
+                        result.session_height + 1,
+                        result.session_height
+                    );
+                    println!();
+                    println!("Snippet: {}", result.snippet);
+                    println!();
+                    print!(
+                        "{}",
+                        repl::replay::format_execution_result(&result.execution)
+                    );
+                }
+                Err(e) => {
+                    eprintln!("{} {}", red!("error:"), e);
+                    process::exit(1);
                 }
             }
         }

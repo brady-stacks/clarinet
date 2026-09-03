@@ -225,6 +225,28 @@ pub struct TransactionRes {
     pub performance: Option<String>,
 }
 
+/// Returned by `replayTransaction`: the execution result plus metadata about
+/// the transaction that was replayed.
+#[wasm_bindgen(getter_with_clone)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReplayTransactionRes {
+    /// Hex-encoded Clarity value returned by the transaction.
+    pub result: String,
+    /// JSON-encoded array of events emitted by the transaction.
+    pub events: String,
+    /// JSON-encoded execution costs.
+    pub costs: String,
+    /// Transaction type: `contract_call`, `smart_contract`, or `token_transfer`.
+    pub tx_type: String,
+    /// The original sender address of the transaction.
+    pub sender: String,
+    /// The Clarity snippet that was evaluated to replay the transaction.
+    pub snippet: String,
+    /// The Stacks block height at which the MXS session was initialized
+    /// (one block before the transaction was mined).
+    pub session_height: u32,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TransactionResRaw {
     pub result: String,
@@ -1340,6 +1362,52 @@ impl SDK {
         self.costs_reports.clear();
 
         Ok(SessionReport { coverage, costs })
+    }
+
+    /// Replay a transaction by its txid using Mainnet Execution Simulation (MXS).
+    ///
+    /// Fetches the transaction from the Stacks API, initializes an MXS session at the
+    /// block height just before the transaction was mined, and re-executes the call with
+    /// the original sender and arguments.
+    ///
+    /// `api_url` defaults to `https://api.hiro.so` (mainnet).
+    /// `block_height_override` forces a specific session height instead of `block_height - 1`.
+    #[wasm_bindgen(js_name=replayTransaction)]
+    pub fn replay_transaction(
+        &mut self,
+        txid: &str,
+        api_url: Option<String>,
+        block_height_override: Option<u32>,
+    ) -> Result<ReplayTransactionRes, String> {
+        use clarity_repl::repl::replay;
+        use clarity_repl::repl::settings::ApiUrl;
+
+        let api_url = ApiUrl(api_url.unwrap_or_else(|| "https://api.hiro.so".to_string()));
+        let result = replay::replay_transaction(api_url, txid, block_height_override, None)?;
+
+        let tx_result = match &result.execution.result {
+            EvaluationResult::Snippet(res) => clarity_values::to_raw_value(&res.result),
+            EvaluationResult::Contract(ref contract) => match contract.result {
+                Some(ref res) => clarity_values::to_raw_value(res),
+                _ => "0x03".into(),
+            },
+        };
+        let events_as_strings = result
+            .execution
+            .events
+            .iter()
+            .map(|e| json!(serialize_event(e)).to_string())
+            .collect::<Vec<String>>();
+
+        Ok(ReplayTransactionRes {
+            result: tx_result,
+            events: json!(events_as_strings).to_string(),
+            costs: json!(result.execution.cost).to_string(),
+            tx_type: result.tx_type,
+            sender: result.sender,
+            snippet: result.snippet,
+            session_height: result.session_height,
+        })
     }
 
     #[wasm_bindgen(js_name=enablePerformance)]

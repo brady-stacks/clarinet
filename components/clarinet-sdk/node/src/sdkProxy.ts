@@ -18,6 +18,7 @@ import {
   type ParsedTransactionResult,
   type Execute,
   type TransferSTX,
+  type ReplayTransaction,
   parseCosts,
 } from "../../common/src/sdkProxyHelpers.js";
 
@@ -42,7 +43,9 @@ export type Simnet = {
                 ? GetDataVar
                 : K extends "getMapEntry"
                   ? GetMapEntry
-                  : SDK[K];
+                  : K extends "replayTransaction"
+                    ? ReplayTransaction
+                    : SDK[K];
 };
 
 function parseTxResponse(response: TransactionRes): ParsedTransactionResult {
@@ -152,6 +155,27 @@ export function getSessionProxy() {
           return result;
         };
         return getMapEntry;
+      }
+
+      if (prop === "replayTransaction") {
+        const replayTransaction: ReplayTransaction = (txid, options) => {
+          const response = session.replayTransaction(
+            txid,
+            options?.apiUrl ?? undefined,
+            options?.blockHeightOverride ?? undefined,
+          );
+          return {
+            result: Cl.deserialize(response.result),
+            events: parseEvents(response.events),
+            costs: parseCosts(response.costs),
+            performance: undefined,
+            tx_type: response.tx_type,
+            sender: response.sender,
+            snippet: response.snippet,
+            session_height: response.session_height,
+          };
+        };
+        return replayTransaction;
       }
 
       return Reflect.get(session, prop, receiver);

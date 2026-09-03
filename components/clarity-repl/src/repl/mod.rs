@@ -7,6 +7,7 @@ mod docs;
 pub mod hooks;
 pub mod interpreter;
 pub mod remote_data;
+pub mod replay;
 pub mod session;
 pub mod settings;
 

@@ -218,6 +218,42 @@ pub struct Block {
     pub burn_block_hash: BurnchainHeaderHash,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TransactionDetails {
+    pub tx_id: String,
+    pub tx_type: String,
+    pub sender_address: String,
+    pub block_height: Option<u32>,
+    pub contract_call: Option<ContractCallTx>,
+    pub smart_contract: Option<SmartContractTx>,
+    pub token_transfer: Option<TokenTransferTx>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContractCallTx {
+    pub contract_id: String,
+    pub function_name: String,
+    pub function_args: Vec<FunctionArgRepr>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FunctionArgRepr {
+    pub name: String,
+    pub repr: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SmartContractTx {
+    pub contract_id: String,
+    pub source_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TokenTransferTx {
+    pub recipient_address: String,
+    pub amount: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct HttpClient {
     url: ApiUrl,
@@ -296,6 +332,11 @@ impl HttpClient {
             "/v2/contracts/source/{}/{}?proof=false",
             contract.issuer, contract.name
         ))
+    }
+
+    pub fn fetch_transaction(&self, txid: &str) -> Result<TransactionDetails, String> {
+        let txid = txid.trim_start_matches("0x");
+        self.get::<TransactionDetails>(&format!("/extended/v1/tx/0x{txid}"))
     }
 }
 #[cfg(test)]
@@ -529,6 +570,108 @@ mod tests {
         let info = client.fetch_info();
         assert_eq!(info.network_id, 1);
         assert_eq!(info.stacks_tip_height, 556946);
+    }
+
+    #[test]
+    fn test_http_client_fetch_transaction_contract_call() {
+        let mut server = mockito::Server::new();
+        #[rustfmt::skip]
+        let body = indoc!(r#"
+            {
+                "tx_id": "0xabc123",
+                "tx_type": "contract_call",
+                "sender_address": "SP1H1733V5MZ3SZ9XRW9FKYGEZT0JDGEB8Y634C7R",
+                "block_height": 107108,
+                "tx_status": "success",
+                "contract_call": {
+                    "contract_id": "SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE.xbtc-ft",
+                    "function_name": "transfer",
+                    "function_signature": "(transfer (uint principal principal (optional (buff 34))) (response bool uint))",
+                    "function_args": [
+                        {
+                            "hex": "0x01000000000000000000000000000f4240",
+                            "repr": "u1000000",
+                            "name": "amount",
+                            "type": "uint"
+                        },
+                        {
+                            "hex": "0x051a1bfc6e4d338a946d66db55e3fb4a0a69e3d1b5",
+                            "repr": "'SP1H1733V5MZ3SZ9XRW9FKYGEZT0JDGEB8Y634C7R",
+                            "name": "sender",
+                            "type": "principal"
+                        }
+                    ]
+                }
+            }
+        "#);
+        let _ = server
+            .mock("GET", "/extended/v1/tx/0xabc123")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create();
+
+        let client = HttpClient::new(ApiUrl(server.url()));
+        let tx = client.fetch_transaction("0xabc123").unwrap();
+
+        assert_eq!(tx.tx_id, "0xabc123");
+        assert_eq!(tx.tx_type, "contract_call");
+        assert_eq!(
+            tx.sender_address,
+            "SP1H1733V5MZ3SZ9XRW9FKYGEZT0JDGEB8Y634C7R"
+        );
+        assert_eq!(tx.block_height, Some(107108));
+
+        let call = tx.contract_call.unwrap();
+        assert_eq!(
+            call.contract_id,
+            "SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE.xbtc-ft"
+        );
+        assert_eq!(call.function_name, "transfer");
+        assert_eq!(call.function_args.len(), 2);
+        assert_eq!(call.function_args[0].name, "amount");
+        assert_eq!(call.function_args[0].repr, "u1000000");
+        assert_eq!(
+            call.function_args[1].repr,
+            "'SP1H1733V5MZ3SZ9XRW9FKYGEZT0JDGEB8Y634C7R"
+        );
+    }
+
+    #[test]
+    fn test_http_client_fetch_transaction_token_transfer() {
+        let mut server = mockito::Server::new();
+        #[rustfmt::skip]
+        let body = indoc!(r#"
+            {
+                "tx_id": "0xdef456",
+                "tx_type": "token_transfer",
+                "sender_address": "SP2C2YFP12AJZB4MABJBAJ55XECVS7E4PMMZ89YZR",
+                "block_height": 200000,
+                "tx_status": "success",
+                "token_transfer": {
+                    "recipient_address": "SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE",
+                    "amount": "5000000",
+                    "memo": "0x00"
+                }
+            }
+        "#);
+        let _ = server
+            .mock("GET", "/extended/v1/tx/0xdef456")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create();
+
+        let client = HttpClient::new(ApiUrl(server.url()));
+        let tx = client.fetch_transaction("0xdef456").unwrap();
+
+        assert_eq!(tx.tx_type, "token_transfer");
+        let transfer = tx.token_transfer.unwrap();
+        assert_eq!(
+            transfer.recipient_address,
+            "SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE"
+        );
+        assert_eq!(transfer.amount, "5000000");
     }
 
     // we should better handle network errors. tracked in #1646

@@ -2,6 +2,7 @@ export {
   tx,
   type ClarityEvent,
   type ParsedTransactionResult,
+  type ReplayTransactionResult,
   type DeployContractOptions,
   type Tx,
   type TransferSTX,

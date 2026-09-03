@@ -27,6 +27,27 @@ export type ParsedTransactionResult = {
   performance: string | undefined;
 };
 
+export type ReplayTransactionResult = ParsedTransactionResult & {
+  /** Transaction type: `contract_call`, `smart_contract`, or `token_transfer`. */
+  tx_type: string;
+  /** The original sender address of the replayed transaction. */
+  sender: string;
+  /** The Clarity snippet that was evaluated. */
+  snippet: string;
+  /** The Stacks block height at which the MXS session was initialized. */
+  session_height: number;
+};
+
+export type ReplayTransaction = (
+  txid: string,
+  options?: {
+    /** Stacks API URL. Defaults to `https://api.hiro.so` (mainnet). */
+    apiUrl?: string;
+    /** Override the block height at which to initialize the session. */
+    blockHeightOverride?: number;
+  },
+) => ReplayTransactionResult;
+
 export type CallFn = (
   contract: string,
   method: string,
