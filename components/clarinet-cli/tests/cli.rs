@@ -767,3 +767,26 @@ fn test_deployment_environment_mapping() {
         "mainnet should strip #[env(simnet)] code"
     );
 }
+
+/// Finding 14 of the PR #2483 review: the `dap` server branch resolves its
+/// manifest by hand and falls back to a bare relative `PathBuf::from(
+/// "Clarinet.toml")`, so a missing manifest surfaces as an obscure downstream
+/// read error. Every other command uses `get_manifest_location_or_exit`, which
+/// prints `Could not find Clarinet.toml` and exits cleanly.
+#[test]
+fn dap_server_reports_a_missing_manifest_clearly() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_clarinet"))
+        .args(["dap", "--sdk-port", "0"])
+        .current_dir(temp_dir.path())
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Could not find Clarinet.toml"),
+        "expected the same clear message every other command gives for a \
+         missing manifest, got: {stderr}"
+    );
+}

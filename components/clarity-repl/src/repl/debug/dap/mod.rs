@@ -1277,3 +1277,143 @@ fn type_for_value(value: &Value) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    const CONTRACT: &str = "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.counter";
+    const SOURCE: &str = "/project/contracts/counter.clar";
+
+    /// A debugger in attach mode with one contract registered and its debug
+    /// state already built, standing in for a session that has completed
+    /// `attach` and is receiving breakpoint configuration.
+    fn attached_debugger() -> DAPDebugger {
+        attached_debugger_at(&PathBuf::from(SOURCE))
+    }
+
+    /// As `attached_debugger`, but registering the contract under `path` —
+    /// mirroring `run_dap_server`, which registers the *canonicalized* path.
+    fn attached_debugger_at(path: &Path) -> DAPDebugger {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let reader: Box<dyn AsyncRead + Unpin + Send> = Box::new(tokio::io::empty());
+        let writer: Box<dyn AsyncWrite + Unpin + Send> = Box::new(tokio::io::sink());
+        let mut debugger = DAPDebugger::from_io(rt, reader, writer, true);
+
+        let contract_id = QualifiedContractIdentifier::parse(CONTRACT).unwrap();
+        debugger
+            .path_to_contract_id
+            .insert(path.to_path_buf(), contract_id.clone());
+        debugger
+            .contract_id_to_path
+            .insert(contract_id.clone(), path.to_path_buf());
+        debugger.state = Some(DebugState::new(&contract_id, ""));
+        debugger
+    }
+
+    /// Send a `setBreakpoints` naming `source` — the path string the editor
+    /// sends, which need not be the one the server registered.
+    #[cfg(windows)]
+    fn set_breakpoint_at(debugger: &mut DAPDebugger, seq: i64, source: &str, line: u32) {
+        let arguments = serde_json::from_value(serde_json::json!({
+            "source": {"path": source},
+            "breakpoints": [{"line": line}],
+        }))
+        .unwrap();
+        debugger.set_breakpoints(seq, arguments);
+    }
+
+    /// Finding 14 of the PR #2483 review: `prepare_for_call` resets execution
+    /// state but leaves `stack_frames`, `scopes` and `variables` populated. In a
+    /// one-shot stdio session the process exited after one call; the long-lived
+    /// server calls this once per contract call, so the caches only grow.
+    ///
+    /// Two consequences: stale frames from a finished call are still reachable,
+    /// and scope ids are derived as `frame.id * 1000 + n`, so a later call whose
+    /// frame reuses an id collides with the previous call's scopes — the editor
+    /// then shows variables from a call that has already returned.
+    #[test]
+    fn prepare_for_call_clears_the_frame_caches() {
+        let mut debugger = attached_debugger();
+        let contract_id = QualifiedContractIdentifier::parse(CONTRACT).unwrap();
+
+        // Stand in for the frames a completed call left behind.
+        let frame: StackFrame = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": "increment",
+            "line": 3,
+            "column": 0,
+        }))
+        .unwrap();
+        let scope: Scope = serde_json::from_value(serde_json::json!({
+            "name": "Locals",
+            "variablesReference": 1000,
+            "expensive": false,
+        }))
+        .unwrap();
+        let variable: Variable = serde_json::from_value(serde_json::json!({
+            "name": "count",
+            "value": "u1",
+            "variablesReference": 0,
+        }))
+        .unwrap();
+        debugger.stack_frames.insert(
+            FunctionIdentifier::new_user_function("increment", "counter"),
+            frame,
+        );
+        debugger.scopes.insert(1, vec![scope]);
+        debugger.variables.insert(1000, vec![variable]);
+
+        debugger.prepare_for_call(&contract_id, "(contract-call? .counter get-count)");
+
+        assert_eq!(
+            (
+                debugger.stack_frames.len(),
+                debugger.scopes.len(),
+                debugger.variables.len()
+            ),
+            (0, 0, 0),
+            "frames, scopes and variables from the previous call are still cached"
+        );
+    }
+    /// Finding 10 of the PR #2483 review: `run_dap_server` canonicalizes
+    /// contract paths, and on Windows `std::fs::canonicalize` returns a
+    /// `\\?\`-prefixed extended-length path. `set_breakpoints` then does an
+    /// exact `PathBuf` lookup against the `source.path` VSCode sends
+    /// (`c:\proj\contracts\counter.clar`), which never matches — so every
+    /// breakpoint is rejected with "contract not found for path" and the feature
+    /// silently degrades to SDK-only behaviour.
+    ///
+    /// `run_dap` does not canonicalize, so the two modes resolve breakpoint
+    /// paths differently and both need a normalization helper that strips the
+    /// verbatim prefix. This is Windows-only: elsewhere `canonicalize` returns a
+    /// path that compares equal.
+    #[cfg(windows)]
+    #[test]
+    fn breakpoints_bind_when_the_registered_path_was_canonicalized() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("counter.clar");
+        std::fs::write(&source, "(define-data-var count uint u0)\n").unwrap();
+
+        // What `make_session` stores: the canonicalized path.
+        let canonical = std::fs::canonicalize(&source).unwrap();
+        let mut debugger = attached_debugger_at(&canonical);
+
+        // What the editor sends: the plain path, with no verbatim prefix.
+        set_breakpoint_at(&mut debugger, 1, source.to_str().unwrap(), 1);
+
+        let armed: Vec<usize> = debugger.get_state().breakpoints.keys().copied().collect();
+        assert_eq!(
+            armed.len(),
+            1,
+            "the breakpoint was rejected because the registered path \
+             ({canonical:?}) does not compare equal to the path the editor sent \
+             ({source:?})"
+        );
+    }
+}

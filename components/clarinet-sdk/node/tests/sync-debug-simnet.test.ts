@@ -1,0 +1,318 @@
+/**
+ * Tests for the synchronous debug proxy that `initSimnet()` returns when
+ * `CLARINET_DEBUG_PORT` is set (`syncDebugSimnet.ts` + `syncDebugSocket.ts`).
+ *
+ * A mock JSON-line server stands in for `clarinet dap`, so the proxy and its
+ * worker transport are exercised without a Rust build. The mock has to run in
+ * its own thread: `syncSend` blocks the main thread with `Atomics.wait`, so a
+ * server on the main thread could never answer. Requests it receives are
+ * relayed back with `postMessage` and drain the next time the main thread
+ * yields.
+ */
+import { Worker } from "node:worker_threads";
+import { afterEach, expect, it } from "vitest";
+
+import { closeSyncSocket, connectSyncSocket, syncSend } from "../src/syncDebugSocket";
+import { createSyncDebugSimnet } from "../src/syncDebugSimnet";
+import { initSimnet } from "../src/index";
+
+type SdkRequest = Record<string, unknown> & { id?: number; method?: string };
+
+const ACCOUNTS_DEPLOYER = "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM";
+
+/**
+ * Mock `clarinet dap` SDK server. Serialized and spawned with `eval: true`, the
+ * same way `syncDebugSocket.ts` spawns its own worker, so this file stays
+ * self-contained. Plain JS only — the body is stringified.
+ */
+function mockServerMain() {
+  /* eslint-disable */
+  const net = require("node:net");
+  const { workerData, parentPort } = require("node:worker_threads");
+  const { mode, label } = workerData;
+
+  const ACCOUNTS = {
+    deployer: "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM",
+    wallet_1: "ST1SJ3DTE5DN7X54YDH5D64R3BCB6A2AG2ZQ8YPD5",
+  };
+
+  const line = (value: unknown) => JSON.stringify(value) + "\n";
+
+  function respond(socket: any, request: any) {
+    if (request.method === "getAccounts") {
+      socket.write(line({ id: request.id, result: { accounts: ACCOUNTS } }));
+      return;
+    }
+    if (mode === "labelled") {
+      socket.write(line({ id: request.id, result: { server: label } }));
+      return;
+    }
+    if (mode === "coalesced") {
+      // A late reply to an earlier, abandoned request lands in the same TCP
+      // segment as the reply to this one.
+      socket.write(
+        line({ id: 999, result: { server: "stale" } }) +
+          line({ id: request.id, result: { server: "fresh" } }),
+      );
+      return;
+    }
+    socket.write(
+      line({ id: request.id, result: { result: "0x0703", events: "[]", costs: "null" } }),
+    );
+  }
+
+  const server = net.createServer((socket: any) => {
+    let buffer = "";
+    socket.on("data", (chunk: any) => {
+      buffer += chunk.toString("utf8");
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const raw of lines) {
+        if (!raw.trim()) continue;
+        const request = JSON.parse(raw);
+        parentPort.postMessage({ type: "request", request });
+        respond(socket, request);
+      }
+    });
+  });
+
+  server.listen(0, "127.0.0.1", () => {
+    parentPort.postMessage({ type: "listening", port: server.address().port });
+  });
+  /* eslint-enable */
+}
+
+const MOCK_SERVER_SOURCE = `(${mockServerMain.toString()})()`;
+
+type MockServer = {
+  port: number;
+  /** Requests the server has received, as of the last time the loop yielded. */
+  requests: () => Promise<SdkRequest[]>;
+};
+
+const workers: Worker[] = [];
+
+async function startMockServer(
+  options: { mode?: "default" | "labelled" | "coalesced"; label?: string } = {},
+): Promise<MockServer> {
+  const received: SdkRequest[] = [];
+  const worker = new Worker(MOCK_SERVER_SOURCE, {
+    eval: true,
+    workerData: { mode: options.mode ?? "default", label: options.label ?? "" },
+  });
+  worker.unref();
+  workers.push(worker);
+
+  const { promise, resolve, reject } = Promise.withResolvers<number>();
+  worker.on("message", (message: { type: string; port?: number; request?: SdkRequest }) => {
+    if (message.type === "listening") resolve(message.port!);
+    else if (message.type === "request") received.push(message.request!);
+  });
+  worker.on("error", reject);
+
+  return {
+    port: await promise,
+    requests: async () => {
+      // Messages posted while the main thread was blocked in `Atomics.wait`
+      // only drain once it yields, so give the event loop a real turn.
+      await new Promise((r) => setTimeout(r, 50));
+      return received;
+    },
+  };
+}
+
+/** Connect the worker transport and build a proxy against a mock server. */
+async function connectProxy(options?: {
+  mode?: "default" | "labelled" | "coalesced";
+  label?: string;
+}) {
+  const server = await startMockServer(options);
+  await connectSyncSocket(server.port);
+  return { proxy: createSyncDebugSimnet(), server };
+}
+
+afterEach(async () => {
+  delete process.env["CLARINET_DEBUG_PORT"];
+  closeSyncSocket();
+  await Promise.all(workers.splice(0).map((worker) => worker.terminate()));
+});
+
+/**
+ * Finding 20 of the PR #2483 review: `index.ts` casts the proxy with
+ * `as unknown as Simnet`, and `Simnet` is a mapped type over the *entire* wasm
+ * `SDK`. `SyncDebugSimnet` declares 18 of those members; the rest are a runtime
+ * `TypeError` or a silent `undefined` as soon as `CLARINET_DEBUG_PORT` is set.
+ *
+ * `transferSTX` and `deployContract` matter most: both exist as `mineBlock`
+ * transaction types but not as top-level methods, so `simnet.transferSTX(...)` —
+ * the form most tests use — is a `TypeError`.
+ *
+ * The list is `keyof SDK` from `clarinet_sdk.d.ts`, minus `constructor`, `free`,
+ * `[Symbol.dispose]` and the static `getDefaultEpoch`, minus what
+ * `SyncDebugSimnet` declares. The `as unknown as` cast is what removes the
+ * compile-time signal; without it `tsc` would name every one of these.
+ */
+const UNIMPLEMENTED_SIMNET_MEMBERS = [
+  "clearCache",
+  "currentEpoch",
+  "deployContract",
+  "enablePerformance",
+  "executeCommand",
+  "generateDeploymentPlan",
+  "getBlockTime",
+  "getContractAST",
+  "getContractSource",
+  "getContractsInterfaces",
+  "getDataVar",
+  "getDefaultClarityVersionForCurrentEpoch",
+  "getMapEntry",
+  "initEmptySession",
+  "mineEmptyBlocks",
+  "mineEmptyBurnBlock",
+  "mineEmptyBurnBlocks",
+  "mineEmptyStacksBlocks",
+  "mintFT",
+  "mintSTX",
+  "setEpoch",
+  "setLocalAccounts",
+  "transferSTX",
+] as const;
+
+it("the debug proxy implements the whole Simnet surface", async () => {
+  const { proxy } = await connectProxy();
+  const members = proxy as unknown as Record<string, unknown>;
+
+  const absent = UNIMPLEMENTED_SIMNET_MEMBERS.filter((name) => members[name] === undefined);
+
+  expect(
+    absent,
+    `initSimnet() presents this proxy as a Simnet, but ${absent.length} of its members are missing`,
+  ).toEqual([]);
+});
+
+/**
+ * Finding 20 of the PR #2483 review: `collectReport` traded a crash for a wrong
+ * answer. It used to be absent, so `vitest.setup.ts` threw in `afterEach`; it
+ * now returns `{ coverage: "", costs: "" }`, which `vitest.setup.ts` pushes
+ * straight into the report arrays. A `--coverage` or `--costs` run under
+ * `CLARINET_DEBUG_PORT` writes an empty lcov, and a coverage gate reads that as
+ * 0% rather than "unsupported".
+ *
+ * Until the server implements reporting, the proxy should reject the operation
+ * explicitly instead of returning data that looks valid.
+ */
+it("collectReport reports that coverage is unsupported", async () => {
+  const { proxy } = await connectProxy();
+
+  expect(() => proxy.collectReport(false, "")).toThrow(/coverage|cost|report/i);
+});
+
+/**
+ * Finding 20 of the PR #2483 review: the proxy's `callPrivateFn` sends
+ * `method: "callPublicFn"`, so the server has no way to tell the two apart and
+ * routes it through an ordinary `contract-call?` — which cannot reach a
+ * `define-private` function at all. Under `CLARINET_DEBUG_PORT` an existing
+ * `simnet.callPrivateFn(...)` therefore fails with "has no public function".
+ */
+it("callPrivateFn tells the server it is a private call", async () => {
+  const { proxy, server } = await connectProxy();
+
+  proxy.callPrivateFn("counter", "double", [], ACCOUNTS_DEPLOYER);
+
+  const methods = (await server.requests()).map((request) => request.method);
+  expect(methods).toContain("callPrivateFn");
+});
+
+/**
+ * Finding 11 of the PR #2483 review: `state` in `syncDebugSocket.ts` is module
+ * global and `connectSyncSocket` returns early whenever it is live
+ * (`if (state && !state.dead) return;`). A second call naming a *different*
+ * port is therefore a silent no-op that keeps talking to the first server.
+ *
+ * `initSimnet()` calls `connectSyncSocket(debugPort)` on every invocation with
+ * the comment "no-op if already connected", so a run that legitimately switches
+ * servers — a new CodeLens session on a fresh port while the old worker is
+ * still alive, which is easy because `closeSyncSocket()` is exported and never
+ * called — keeps driving the dead one.
+ */
+it("connectSyncSocket switches to a new port", async () => {
+  const first = await startMockServer({ mode: "labelled", label: "first" });
+  await connectSyncSocket(first.port);
+  expect(JSON.parse(syncSend({ id: 1, method: "ping" })).result.server).toBe("first");
+
+  const second = await startMockServer({ mode: "labelled", label: "second" });
+  await connectSyncSocket(second.port);
+
+  const answered = JSON.parse(syncSend({ id: 2, method: "ping" })).result.server;
+  expect(
+    answered,
+    `connectSyncSocket(${second.port}) was a no-op; requests still go to the server on ${first.port}`,
+  ).toBe("second");
+});
+
+/**
+ * Finding 25 of the PR #2483 review: the worker's `socket.on("data")` handler
+ * hands the first non-empty line to whatever request is pending and then
+ * `break`s, discarding the rest of the chunk. The server echoes an `id` on every
+ * response and `DebugClient` matches on it, but the synchronous path that
+ * replaces `DebugClient` under `CLARINET_DEBUG_PORT` ignores it entirely.
+ *
+ * Requests are serialized, so this is correct on the happy path. It is not
+ * correct after a desync: once the 30 s timeout clears `pendingResolve` the late
+ * reply is dropped, and any response coalesced into the same chunk as another is
+ * dropped too — so one call's result is attributed to the next. Match on `id`
+ * and drop non-matching lines explicitly; the field is already on the wire.
+ */
+it("syncSend returns the response matching its request id", async () => {
+  const server = await startMockServer({ mode: "coalesced" });
+  await connectSyncSocket(server.port);
+
+  const response = JSON.parse(syncSend({ id: 7, method: "ping" }));
+
+  expect(
+    response,
+    "a stale reply sharing the chunk was returned instead of this request's own",
+  ).toMatchObject({ id: 7, result: { server: "fresh" } });
+});
+
+/**
+ * Finding 21 of the PR #2483 review: the debug branch in `index.ts` returns
+ * before it ever reaches `getSDK(options)`, so `trackCosts`, `trackCoverage`,
+ * `trackPerformance`, `performanceCostField` and `apiUrl` are all silently
+ * dropped. `apiUrl` matters most — a remote-data test keeps passing while
+ * pointing at whatever the server was started against — and `trackCosts` /
+ * `trackCoverage` compound the `collectReport` problem above.
+ *
+ * Either fix satisfies this: forward the options to the server, or reject the
+ * ones debug mode cannot honour.
+ */
+it("initSimnet honours or rejects its options in debug mode", async () => {
+  const server = await startMockServer();
+  process.env["CLARINET_DEBUG_PORT"] = String(server.port);
+
+  try {
+    await initSimnet("./Clarinet.toml", true, {
+      trackCosts: true,
+      trackCoverage: true,
+      apiUrl: "http://example.invalid/",
+    });
+  } catch (error) {
+    // Acceptable: debug mode says which options it cannot honour.
+    expect((error as Error).message).toMatch(/option|trackCosts|trackCoverage|apiUrl/i);
+    return;
+  }
+
+  const initSession = (await server.requests()).find(
+    (request) => request.method === "initSession",
+  );
+  expect(
+    initSession,
+    "initSession went to the server with no trace of the options initSimnet was given",
+  ).toMatchObject({
+    options: {
+      trackCosts: true,
+      trackCoverage: true,
+      apiUrl: "http://example.invalid/",
+    },
+  });
+});
