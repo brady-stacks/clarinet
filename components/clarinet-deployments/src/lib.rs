@@ -1093,6 +1093,28 @@ pub async fn generate_default_deployment_with_cache(
             queue.push_front(contract_id);
         }
 
+        // When remote_data is enabled, the remote node holds all contract state.
+        // Clarinet does not re-deploy requirements locally in this mode.
+        if simnet_remote_data && !explicit_ids.is_empty() {
+            let api_url = manifest.repl_settings.remote_data.api_url.to_string();
+            let initial_height = manifest.repl_settings.remote_data.initial_height;
+            let mut errors = Vec::new();
+            for contract_id in &explicit_ids {
+                if let Err(e) = requirements::validate_requirement_for_remote_data(
+                    contract_id,
+                    &api_url,
+                    initial_height,
+                )
+                .await
+                {
+                    errors.push(e);
+                }
+            }
+            if !errors.is_empty() {
+                return Err(errors.join("\n"));
+            }
+        }
+
         // Auto-detection is iterative: loading a requirement can reveal new
         // dependencies in the user contracts. For example, a contract literal
         // passed as a trait argument is only identifiable once the callee's

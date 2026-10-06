@@ -164,6 +164,40 @@ async fn fetch_contract(
         .map_err(|e| format!("Unable to parse contract json data {url}: {e}"))
 }
 
+/// Check that a requirement exists on the configured remote network.
+/// If `initial_height` is set, also check that the contract was deployed at or before that height.
+///
+/// When `remote_data` is enabled in simnet, the remote node holds all contract state.
+/// Clarinet does not re-deploy requirements locally in this mode.
+/// Use this function to confirm that a declared dependency is present on the remote network.
+pub async fn validate_requirement_for_remote_data(
+    contract_id: &QualifiedContractIdentifier,
+    api_url: &str,
+    initial_height: Option<u32>,
+) -> Result<(), String> {
+    let deployer = contract_id.issuer.to_address();
+    let name = contract_id.name.to_string();
+
+    let contract = fetch_contract(api_url, &deployer, &name).await.map_err(|e| {
+        format!(
+            "requirement '{contract_id}' could not be fetched from '{api_url}': {e}. \
+             Check that api_url points to the correct network and that the contract is deployed there."
+        )
+    })?;
+
+    if let Some(initial_height) = initial_height {
+        if contract.block_height > initial_height {
+            return Err(format!(
+                "requirement '{contract_id}': deploy height {} exceeds \
+                 the remote_data initial_height of {initial_height}.",
+                contract.block_height
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use mockito::Server;
@@ -284,5 +318,124 @@ mod tests {
 
         assert_eq!(source2, TEST_SOURCE);
         assert_eq!(clarity_version2, ClarityVersion::Clarity3);
+    }
+
+    #[tokio::test]
+    async fn test_validate_requirement_ok_without_height() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock(
+                "GET",
+                format!("/extended/v1/contract/{TEST_DEPLOYER}.{TEST_CONTRACT_NAME}").as_str(),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "source_code": TEST_SOURCE,
+                    "block_height": 175232,
+                    "clarity_version": 3
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let contract_id =
+            QualifiedContractIdentifier::parse(&format!("{TEST_DEPLOYER}.{TEST_CONTRACT_NAME}"))
+                .unwrap();
+        let result =
+            validate_requirement_for_remote_data(&contract_id, &server.url(), None).await;
+        assert!(result.is_ok());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_validate_requirement_ok_deployed_before_initial_height() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock(
+                "GET",
+                format!("/extended/v1/contract/{TEST_DEPLOYER}.{TEST_CONTRACT_NAME}").as_str(),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "source_code": TEST_SOURCE,
+                    "block_height": 100,
+                    "clarity_version": 3
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let contract_id =
+            QualifiedContractIdentifier::parse(&format!("{TEST_DEPLOYER}.{TEST_CONTRACT_NAME}"))
+                .unwrap();
+        let result =
+            validate_requirement_for_remote_data(&contract_id, &server.url(), Some(200)).await;
+        assert!(result.is_ok());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_validate_requirement_error_deployed_after_initial_height() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock(
+                "GET",
+                format!("/extended/v1/contract/{TEST_DEPLOYER}.{TEST_CONTRACT_NAME}").as_str(),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "source_code": TEST_SOURCE,
+                    "block_height": 300,
+                    "clarity_version": 3
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let contract_id =
+            QualifiedContractIdentifier::parse(&format!("{TEST_DEPLOYER}.{TEST_CONTRACT_NAME}"))
+                .unwrap();
+        let err =
+            validate_requirement_for_remote_data(&contract_id, &server.url(), Some(200))
+                .await
+                .unwrap_err();
+        assert!(err.contains("deploy height 300"));
+        assert!(err.contains("initial_height of 200"));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_validate_requirement_error_not_on_network() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock(
+                "GET",
+                format!("/extended/v1/contract/{TEST_DEPLOYER}.{TEST_CONTRACT_NAME}").as_str(),
+            )
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let contract_id =
+            QualifiedContractIdentifier::parse(&format!("{TEST_DEPLOYER}.{TEST_CONTRACT_NAME}"))
+                .unwrap();
+        let err = validate_requirement_for_remote_data(&contract_id, &server.url(), None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("could not be fetched from"));
+        mock.assert_async().await;
     }
 }
