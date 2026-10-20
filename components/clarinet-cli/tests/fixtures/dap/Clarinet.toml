@@ -1,0 +1,8 @@
+[project]
+name = 'dap-test'
+telemetry = false
+
+[contracts.counter]
+path = 'contracts/counter.clar'
+epoch = 'latest'
+clarity_version = 3
