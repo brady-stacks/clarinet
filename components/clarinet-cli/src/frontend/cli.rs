@@ -5,7 +5,7 @@ use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::{env, process};
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Generator, Shell};
 use clarinet_defaults::DEFAULT_EPOCH;
 use clarinet_deployments::diagnostic_digest::DiagnosticsDigest;
@@ -413,6 +413,25 @@ struct GenerateDeployment {
     pub manual_cost: bool,
 }
 
+// Flattened into each command that loads a default deployment plan.
+#[derive(Args, PartialEq, Clone, Copy, Debug)]
+struct DeploymentPlanFlags {
+    /// Use on disk deployment plan (prevent updates computing)
+    #[clap(
+        long = "use-on-disk-deployment-plan",
+        short = 'd',
+        conflicts_with = "use_computed_deployment_plan"
+    )]
+    pub use_on_disk_deployment_plan: bool,
+    /// Use computed deployment plan (will overwrite on disk version if any update)
+    #[clap(
+        long = "use-computed-deployment-plan",
+        short = 'c',
+        conflicts_with = "use_on_disk_deployment_plan"
+    )]
+    pub use_computed_deployment_plan: bool,
+}
+
 #[derive(Parser, PartialEq, Clone, Debug)]
 struct ApplyDeployment {
     /// Apply default deployment settings/default.devnet-plan.toml
@@ -454,20 +473,8 @@ struct ApplyDeployment {
     /// Display streams of logs instead of terminal UI dashboard
     #[clap(long = "no-dashboard")]
     pub no_dashboard: bool,
-    /// Use on disk deployment plan (prevent updates computing)
-    #[clap(
-        long = "use-on-disk-deployment-plan",
-        short = 'd',
-        conflicts_with = "use_computed_deployment_plan"
-    )]
-    pub use_on_disk_deployment_plan: bool,
-    /// Use computed deployment plan (will overwrite on disk version if any update)
-    #[clap(
-        long = "use-computed-deployment-plan",
-        short = 'c',
-        conflicts_with = "use_on_disk_deployment_plan"
-    )]
-    pub use_computed_deployment_plan: bool,
+    #[clap(flatten)]
+    pub plan_flags: DeploymentPlanFlags,
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -488,20 +495,8 @@ struct Console {
     /// If specified, use this deployment file
     #[clap(long = "deployment-plan-path", short = 'p')]
     pub deployment_plan_path: Option<String>,
-    /// Use on disk deployment plan (prevent updates computing)
-    #[clap(
-        long = "use-on-disk-deployment-plan",
-        short = 'd',
-        conflicts_with = "use_computed_deployment_plan"
-    )]
-    pub use_on_disk_deployment_plan: bool,
-    /// Use computed deployment plan (will overwrite on disk version if any update)
-    #[clap(
-        long = "use-computed-deployment-plan",
-        short = 'c',
-        conflicts_with = "use_on_disk_deployment_plan"
-    )]
-    pub use_computed_deployment_plan: bool,
+    #[clap(flatten)]
+    pub plan_flags: DeploymentPlanFlags,
 
     /// Enable remote data fetching from mainnet or a testnet
     #[clap(long = "enable-remote-data", short = 'r')]
@@ -534,20 +529,8 @@ struct DevnetStart {
     /// If specified, use this deployment file
     #[clap(long = "deployment-plan-path", short = 'p')]
     pub deployment_plan_path: Option<String>,
-    /// Use on disk deployment plan (prevent updates computing)
-    #[clap(
-        long = "use-on-disk-deployment-plan",
-        short = 'd',
-        conflicts_with = "use_computed_deployment_plan"
-    )]
-    pub use_on_disk_deployment_plan: bool,
-    /// Use computed deployment plan (will overwrite on disk version if any update)
-    #[clap(
-        long = "use-computed-deployment-plan",
-        short = 'c',
-        conflicts_with = "use_on_disk_deployment_plan"
-    )]
-    pub use_computed_deployment_plan: bool,
+    #[clap(flatten)]
+    pub plan_flags: DeploymentPlanFlags,
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -560,20 +543,8 @@ struct Check {
     /// If specified, use this deployment file
     #[clap(long = "deployment-plan-path", short = 'p')]
     pub deployment_plan_path: Option<String>,
-    /// Use on disk deployment plan (prevent updates computing)
-    #[clap(
-        long = "use-on-disk-deployment-plan",
-        short = 'd',
-        conflicts_with = "use_computed_deployment_plan"
-    )]
-    pub use_on_disk_deployment_plan: bool,
-    /// Use computed deployment plan (will overwrite on disk version if any update)
-    #[clap(
-        long = "use-computed-deployment-plan",
-        short = 'c',
-        conflicts_with = "use_on_disk_deployment_plan"
-    )]
-    pub use_computed_deployment_plan: bool,
+    #[clap(flatten)]
+    pub plan_flags: DeploymentPlanFlags,
     /// List available lints and lint groups
     #[clap(long = "show-lints")]
     pub show_lints: bool,
@@ -877,13 +848,14 @@ pub fn main() {
                 };
 
                 let project_root = &manifest.root_dir;
+                let plan_on_disk = PlanOnDisk::from(cmd.plan_flags);
 
                 let result = match (&network, cmd.deployment_plan_path) {
                     (None, None) => {
                         Err(format!("{}: a flag `--devnet`, `--testnet`, `--mainnet` or `--deployment-plan-path=path/to/yaml` should be provided.", yellow!("Command usage")))
                     }
                     (Some(network), None) => {
-                        load_deployment_if_exists(&manifest, network, PlanOnDisk::from_flags(cmd.use_on_disk_deployment_plan, cmd.use_computed_deployment_plan)).and_then(|opt| match opt {
+                        load_deployment_if_exists(&manifest, network, plan_on_disk).and_then(|opt| match opt {
                             Some(deployment) => {
                                 println!(
                                     "{} using existing deployments/default.{}-plan.yaml",
@@ -929,7 +901,7 @@ pub fn main() {
                     DeploymentSynthesis::from_deployment(&deployment, project_root)
                 );
 
-                if !cmd.use_on_disk_deployment_plan {
+                if plan_on_disk != PlanOnDisk::Use {
                     println!("{}", yellow!("Continue [Y/n]?"));
                     let mut buffer = String::new();
                     std::io::stdin().read_line(&mut buffer).unwrap();
@@ -1141,6 +1113,11 @@ pub fn main() {
         },
         Command::Console(cmd) => {
             let eval_mode = !cmd.eval.is_empty();
+            let plan_on_disk = match PlanOnDisk::from(cmd.plan_flags) {
+                // `--eval` has no one to ask.
+                PlanOnDisk::AskToOverwrite if eval_mode => PlanOnDisk::Ignore,
+                other => other,
+            };
             let mut expressions = cmd.eval.iter();
             // Loop to handle `::reload` command
             loop {
@@ -1148,14 +1125,6 @@ pub fn main() {
 
                 let mut terminal = match manifest {
                     Some(ref manifest) => {
-                        let plan_on_disk = match PlanOnDisk::from_flags(
-                            cmd.use_on_disk_deployment_plan,
-                            cmd.use_computed_deployment_plan,
-                        ) {
-                            // `--eval` has no one to ask.
-                            PlanOnDisk::AskToOverwrite if eval_mode => PlanOnDisk::Ignore,
-                            plan_on_disk => plan_on_disk,
-                        };
                         let ((deployment, _, artifacts), _) = load_deployment_and_artifacts_or_exit(
                             manifest,
                             &cmd.deployment_plan_path,
@@ -1407,10 +1376,7 @@ pub fn main() {
                     load_deployment_and_artifacts_or_exit(
                         &manifest,
                         &cmd.deployment_plan_path,
-                        PlanOnDisk::from_flags(
-                            cmd.use_on_disk_deployment_plan,
-                            cmd.use_computed_deployment_plan,
-                        ),
+                        PlanOnDisk::from(cmd.plan_flags),
                         true,
                         environment,
                     );
@@ -1773,14 +1739,14 @@ pub enum PlanOnDisk {
     Ignore,
 }
 
-impl PlanOnDisk {
-    /// Reads the `--use-on-disk-deployment-plan` and
-    /// `--use-computed-deployment-plan` flags, which exclude each other.
-    fn from_flags(use_on_disk: bool, use_computed: bool) -> Self {
-        match (use_on_disk, use_computed) {
-            (true, _) => Self::Use,
-            (_, true) => Self::Overwrite,
-            _ => Self::AskToOverwrite,
+impl From<DeploymentPlanFlags> for PlanOnDisk {
+    fn from(flags: DeploymentPlanFlags) -> Self {
+        if flags.use_on_disk_deployment_plan {
+            Self::Use
+        } else if flags.use_computed_deployment_plan {
+            Self::Overwrite
+        } else {
+            Self::AskToOverwrite
         }
     }
 }
@@ -1803,54 +1769,58 @@ pub fn load_deployment_and_artifacts_or_exit(
     let mut found_env_simnet = false;
     let result = match deployment_plan_path {
         None => {
-            let on_disk = load_deployment_if_exists(manifest, &StacksNetwork::Simnet, plan_on_disk)
-                .map_err(|e| format!("loading {default_deployment_file} failed with error: {e}"));
-            on_disk.and_then(|opt| match opt {
-                Some(mut deployment) => {
-                    eprintln!("{} using {default_deployment_file}", yellow!("note:"));
-                    if environment == Environment::OnChain {
-                        found_env_simnet |= deployment.remove_env_simnet().unwrap_or(false);
-                    }
-                    let artifacts = setup_session_with_deployment(
-                        manifest,
-                        &mut deployment,
-                        None,
-                        enable_analysis,
-                        environment,
-                    );
-                    Ok((deployment, None, artifacts))
-                }
-                None => {
-                    let (mut deployment, ast_artifacts, gen_found_env_simnet) =
-                        generate_default_deployment(
-                            manifest,
-                            &StacksNetwork::Simnet,
-                            false,
-                            environment,
-                        )?;
-                    found_env_simnet |= gen_found_env_simnet;
-                    note_if_plan_on_disk_differs(manifest, &deployment, default_deployment_file);
-                    if ast_artifacts.success {
-                        let mut artifacts = setup_session_with_deployment(
+            load_deployment_if_exists(manifest, &StacksNetwork::Simnet, plan_on_disk)
+                .map_err(|e| format!("loading {default_deployment_file} failed with error: {e}"))
+                .and_then(|opt| match opt {
+                    Some(mut deployment) => {
+                        eprintln!("{} using {default_deployment_file}", yellow!("note:"));
+                        if environment == Environment::OnChain {
+                            found_env_simnet |= deployment.remove_env_simnet().unwrap_or(false);
+                        }
+                        let artifacts = setup_session_with_deployment(
                             manifest,
                             &mut deployment,
-                            Some(&ast_artifacts.asts),
+                            None,
                             enable_analysis,
                             environment,
                         );
-                        for (contract_id, mut parser_diags) in ast_artifacts.diags.into_iter() {
-                            // Merge parser's diags with analysis' diags.
-                            if let Some(ref mut diags) = artifacts.diags.remove(&contract_id) {
-                                parser_diags.append(diags);
-                            }
-                            artifacts.diags.insert(contract_id, parser_diags);
-                        }
                         Ok((deployment, None, artifacts))
-                    } else {
-                        Ok((deployment, None, ast_artifacts))
                     }
-                }
-            })
+                    None => {
+                        let (mut deployment, ast_artifacts, gen_found_env_simnet) =
+                            generate_default_deployment(
+                                manifest,
+                                &StacksNetwork::Simnet,
+                                false,
+                                environment,
+                            )?;
+                        found_env_simnet |= gen_found_env_simnet;
+                        note_if_plan_on_disk_differs(
+                            manifest,
+                            &deployment,
+                            default_deployment_file,
+                        );
+                        if ast_artifacts.success {
+                            let mut artifacts = setup_session_with_deployment(
+                                manifest,
+                                &mut deployment,
+                                Some(&ast_artifacts.asts),
+                                enable_analysis,
+                                environment,
+                            );
+                            for (contract_id, mut parser_diags) in ast_artifacts.diags.into_iter() {
+                                // Merge parser's diags with analysis' diags.
+                                if let Some(ref mut diags) = artifacts.diags.remove(&contract_id) {
+                                    parser_diags.append(diags);
+                                }
+                                artifacts.diags.insert(contract_id, parser_diags);
+                            }
+                            Ok((deployment, None, artifacts))
+                        } else {
+                            Ok((deployment, None, ast_artifacts))
+                        }
+                    }
+                })
         }
         Some(path) => {
             let project_root = &manifest.root_dir;
@@ -1907,8 +1877,6 @@ fn should_existing_plan_be_replaced(
     new_plan: &DeploymentSpecification,
     project_root: &Path,
 ) -> bool {
-    use similar::{ChangeTag, TextDiff};
-
     let existing_file = existing_plan
         .to_file_content(project_root)
         .expect("unable to serialize deployment");
@@ -1916,15 +1884,19 @@ fn should_existing_plan_be_replaced(
         .to_file_content(project_root)
         .expect("unable to serialize deployment");
 
-    if existing_file == new_file {
-        return false;
-    }
+    existing_file != new_file && confirm_plan_overwrite(&existing_file, &new_file)
+}
+
+/// Shows how the computed plan differs from the one on disk and asks whether
+/// to overwrite the file.
+fn confirm_plan_overwrite(current: &[u8], updated: &[u8]) -> bool {
+    use similar::{ChangeTag, TextDiff};
 
     println!("{}", blue!("A new deployment plan was computed and differs from the default deployment plan currently saved on disk:"));
 
     let diffs = TextDiff::from_lines(
-        std::str::from_utf8(&existing_file).unwrap(),
-        std::str::from_utf8(&new_file).unwrap(),
+        std::str::from_utf8(current).unwrap(),
+        std::str::from_utf8(updated).unwrap(),
     );
 
     for change in diffs.iter_all_changes() {
@@ -1954,72 +1926,45 @@ fn load_deployment_if_exists(
 ) -> Result<Option<DeploymentSpecification>, String> {
     let project_root = &manifest.root_dir;
     let default_deployment_location = project_root.join(get_default_deployment_path(network));
-    if !default_deployment_location.exists() || plan_on_disk == PlanOnDisk::Ignore {
+    if !default_deployment_location.exists() {
         return Ok(None);
     }
-
-    if plan_on_disk != PlanOnDisk::Use {
-        match generate_default_deployment(manifest, network, true, network.deployment_environment())
-        {
-            Ok((deployment, _, _)) => {
-                use similar::{ChangeTag, TextDiff};
-
-                let current_version = paths::read_content(&default_deployment_location)?;
-                let updated_version = deployment
-                    .to_file_content(project_root)
-                    .map_err(|err| format!("failed serializing deployment\n{err}"))?;
-
-                if updated_version == current_version {
-                    return load_deployment(project_root, &default_deployment_location).map(Some);
-                }
-
-                if plan_on_disk == PlanOnDisk::AskToOverwrite {
-                    println!("{}", blue!("A new deployment plan was computed and differs from the default deployment plan currently saved on disk:"));
-
-                    let diffs = TextDiff::from_lines(
-                        std::str::from_utf8(&current_version).unwrap(),
-                        std::str::from_utf8(&updated_version).unwrap(),
-                    );
-
-                    for change in diffs.iter_all_changes() {
-                        let formatted_change = match change.tag() {
-                            ChangeTag::Delete => {
-                                format!("{} {}", red!("-"), red!("{change}"))
-                            }
-                            ChangeTag::Insert => {
-                                format!("{} {}", green!("+"), green!("{change}"))
-                            }
-                            ChangeTag::Equal => format!("  {change}"),
-                        };
-                        print!("{formatted_change}");
-                    }
-
-                    println!("{}", yellow!("Overwrite? [Y/n]"));
-                    let mut buffer = String::new();
-                    std::io::stdin().read_line(&mut buffer).unwrap();
-                    if buffer.starts_with('n') {
-                        load_deployment(project_root, &default_deployment_location).map(Some)
-                    } else {
-                        paths::write_content(&default_deployment_location, &updated_version)?;
-                        Ok(Some(deployment))
-                    }
-                } else {
-                    paths::write_content(&default_deployment_location, &updated_version)?;
-                    Ok(Some(deployment))
-                }
-            }
-            Err(message) => {
-                eprintln!(
-                    "{} unable to compute an updated plan\n{}",
-                    red!("error:"),
-                    message
-                );
-                load_deployment(project_root, &default_deployment_location).map(Some)
-            }
-        }
-    } else {
-        load_deployment(project_root, &default_deployment_location).map(Some)
+    let load_on_disk = || load_deployment(project_root, &default_deployment_location).map(Some);
+    match plan_on_disk {
+        PlanOnDisk::Ignore => return Ok(None),
+        PlanOnDisk::Use => return load_on_disk(),
+        PlanOnDisk::AskToOverwrite | PlanOnDisk::Overwrite => {}
     }
+
+    let deployment = match generate_default_deployment(
+        manifest,
+        network,
+        true,
+        network.deployment_environment(),
+    ) {
+        Ok((deployment, _, _)) => deployment,
+        Err(message) => {
+            eprintln!(
+                "{} unable to compute an updated plan\n{}",
+                red!("error:"),
+                message
+            );
+            return load_on_disk();
+        }
+    };
+    let current_version = paths::read_content(&default_deployment_location)?;
+    let updated_version = deployment
+        .to_file_content(project_root)
+        .map_err(|err| format!("failed serializing deployment\n{err}"))?;
+
+    let keep_file = updated_version == current_version
+        || (plan_on_disk == PlanOnDisk::AskToOverwrite
+            && !confirm_plan_overwrite(&current_version, &updated_version));
+    if keep_file {
+        return load_on_disk();
+    }
+    paths::write_content(&default_deployment_location, &updated_version)?;
+    Ok(Some(deployment))
 }
 
 fn sanitize_project_name(name: &str) -> String {
@@ -2425,10 +2370,7 @@ fn devnet_start(cmd: DevnetStart, clarinetrc: ClarinetRC) {
         None => load_deployment_if_exists(
             &manifest,
             &StacksNetwork::Devnet,
-            PlanOnDisk::from_flags(
-                cmd.use_on_disk_deployment_plan,
-                cmd.use_computed_deployment_plan,
-            ),
+            PlanOnDisk::from(cmd.plan_flags),
         )
         .and_then(|opt| match opt {
             Some(deployment) => {
