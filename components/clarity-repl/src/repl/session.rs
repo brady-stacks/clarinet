@@ -449,9 +449,9 @@ impl Session {
                 self.parse_and_advance_burn_chain_tip(cmd)
             }
             cmd if cmd.starts_with("::get_epoch") => Ok(self.get_epoch()),
-            cmd if cmd.starts_with("::set_epoch") => self.set_epoch_result(cmd),
-            cmd if cmd.starts_with("::encode") => self.encode_result(cmd),
-            cmd if cmd.starts_with("::decode") => self.decode_result(cmd),
+            cmd if cmd.starts_with("::set_epoch") => self.set_epoch(cmd),
+            cmd if cmd.starts_with("::encode") => self.encode(cmd),
+            cmd if cmd.starts_with("::decode") => self.decode(cmd),
 
             _ => Err("Invalid command. Try `::help`".yellow().to_string()),
         }
@@ -688,7 +688,7 @@ impl Session {
                     })
                     .collect()
             });
-        output.push(format!("{}  {}", snippet, black!("<console>")));
+        output.push(format!("{snippet}  {}", black!("<console>")));
         output.push(tracer.output.join("\n"));
         result.map(|_| ())
     }
@@ -709,27 +709,24 @@ impl Session {
 
         let mut perf = PerfHook::new(cost_field);
 
-        match self.eval_with_hooks(snippet.to_string(), Some(vec![&mut perf]), true) {
-            Ok(_) => {
-                output.push(
-                    format!(
-                        "Performance data written to perf.data (tracking {})",
-                        cost_field.name()
-                    )
-                    .green()
-                    .to_string(),
-                );
-            }
-            Err(diagnostics) => {
-                let mut errors = vec![];
-                let lines = snippet.lines();
-                let formatted_lines: Vec<String> = lines.map(|l| l.to_string()).collect();
-                for d in diagnostics {
-                    errors.append(&mut output_diagnostic(&d, "<snippet>", &formatted_lines));
-                }
-                return Err(errors);
-            }
-        };
+        self.eval_with_hooks(snippet.to_string(), Some(vec![&mut perf]), true)
+            .map_err(|diagnostics| {
+                let formatted_lines = snippet.lines().map(String::from).collect::<Vec<_>>();
+                diagnostics
+                    .iter()
+                    .flat_map(|diagnostic| {
+                        output_diagnostic(diagnostic, "<snippet>", &formatted_lines)
+                    })
+                    .collect::<Vec<_>>()
+            })?;
+        output.push(
+            format!(
+                "Performance data written to perf.data (tracking {})",
+                cost_field.name()
+            )
+            .green()
+            .to_string(),
+        );
         Ok(())
     }
 
@@ -1556,11 +1553,7 @@ impl Session {
         format!("Current epoch: {current_epoch}")
     }
 
-    pub fn set_epoch(&mut self, cmd: &str) -> String {
-        self.set_epoch_result(cmd).unwrap_or_else(|error| error)
-    }
-
-    fn set_epoch_result(&mut self, cmd: &str) -> Result<String, String> {
+    pub fn set_epoch(&mut self, cmd: &str) -> Result<String, String> {
         let epoch = match cmd.split_once(' ').and_then(|(_, epoch)| super::epoch_from_str(epoch)) {
             Some(epoch) => epoch,
             None => {
@@ -1599,11 +1592,7 @@ impl Session {
         }
     }
 
-    pub fn encode(&mut self, cmd: &str) -> String {
-        self.encode_result(cmd).unwrap_or_else(|error| error)
-    }
-
-    fn encode_result(&mut self, cmd: &str) -> Result<String, String> {
+    pub fn encode(&mut self, cmd: &str) -> Result<String, String> {
         let Some((_, snippet)) = cmd.split_once(' ') else {
             return Err("Usage: ::encode <expr>".red().to_string());
         };
@@ -1650,11 +1639,7 @@ impl Session {
         }
     }
 
-    pub fn decode(&mut self, cmd: &str) -> String {
-        self.decode_result(cmd).unwrap_or_else(|error| error)
-    }
-
-    fn decode_result(&self, cmd: &str) -> Result<String, String> {
+    pub fn decode(&mut self, cmd: &str) -> Result<String, String> {
         let Some((_, byte_string)) = cmd.split_once(' ') else {
             return Err("Usage: ::decode <hex-bytes>".red().to_string());
         };
@@ -1677,6 +1662,7 @@ impl Session {
             return Err(vec!["Usage: ::get_costs <expr>".red().to_string()]);
         };
 
+        // On failure `run_snippet` has already written the diagnostics to `output`.
         self.run_snippet(output, true, expr)
             .map(|_| ())
             .map_err(|_| std::mem::take(output))
@@ -2274,7 +2260,7 @@ mod tests {
     #[test]
     fn encode_error() {
         let mut session = Session::new(SessionSettings::default());
-        let result = session.encode("::encode { foo false }");
+        let result = session.encode("::encode { foo false }").unwrap_err();
         assert_eq!(
             result,
             format!(
@@ -2284,7 +2270,7 @@ mod tests {
             )
         );
 
-        let result = session.encode("::encode (foo 1)");
+        let result = session.encode("::encode (foo 1)").unwrap_err();
         assert_eq!(
             result.split('\n').next().unwrap(),
             format!("{} use of unresolved function 'foo'", "error:".red().bold())
@@ -2295,21 +2281,25 @@ mod tests {
     fn decode_simple() {
         let mut session = Session::new(SessionSettings::default());
 
-        let result = session.decode("::decode 0000000000000000 0000000000000000 2a");
+        let result = session
+            .decode("::decode 0000000000000000 0000000000000000 2a")
+            .unwrap();
         assert_eq!(result, "42".green().to_string());
     }
 
     #[test]
     fn decode_map() {
         let mut session = Session::new(SessionSettings::default());
-        let result = session.decode("::decode 0x0c00000002036261720403666f6f0d0000000568656c6c6f");
+        let result = session
+            .decode("::decode 0x0c00000002036261720403666f6f0d0000000568656c6c6f")
+            .unwrap();
         assert_eq!(result, "{ bar: false, foo: \"hello\" }".green().to_string());
     }
 
     #[test]
     fn decode_error() {
         let mut session = Session::new(SessionSettings::default());
-        let result = session.decode("::decode 42");
+        let result = session.decode("::decode 42").unwrap_err();
         assert_eq!(
             result,
             "Failed to decode clarity value: DeserializationFailure(\"Bad type prefix\")"
@@ -2317,7 +2307,7 @@ mod tests {
                 .to_string()
         );
 
-        let result = session.decode("::decode 4g");
+        let result = session.decode("::decode 4g").unwrap_err();
         assert_eq!(
             result,
             "Parsing error: invalid digit found in string"

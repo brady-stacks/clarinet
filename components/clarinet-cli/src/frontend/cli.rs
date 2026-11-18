@@ -1139,15 +1139,11 @@ pub fn main() {
             }
         },
         Command::Console(cmd) => {
+            let eval_mode = !cmd.eval.is_empty();
             let mut expressions = cmd.eval.iter();
             // Loop to handle `::reload` command
             loop {
-                let mut manifest = load_manifest_or_warn(cmd.manifest_path.clone());
-                if !cmd.eval.is_empty() {
-                    if let Some(manifest) = &mut manifest {
-                        manifest.repl_settings.show_timings = false;
-                    }
-                }
+                let manifest = load_manifest_or_warn(cmd.manifest_path.clone());
 
                 let mut terminal = match manifest {
                     Some(ref manifest) => {
@@ -1156,22 +1152,22 @@ pub fn main() {
                             &cmd.deployment_plan_path,
                             cmd.use_on_disk_deployment_plan,
                             cmd.use_computed_deployment_plan
-                                || (!cmd.eval.is_empty() && !cmd.use_on_disk_deployment_plan),
+                                || (eval_mode && !cmd.use_on_disk_deployment_plan),
                             false,
                             Environment::Simnet,
                         );
 
-                        if !artifacts.success || !cmd.eval.is_empty() {
+                        if !artifacts.success || eval_mode {
                             let diags_digest = DiagnosticsDigest::new(
                                 &artifacts.diags,
                                 &artifacts.lint_diags,
                                 &deployment,
                             );
                             if diags_digest.has_feedbacks() {
-                                if cmd.eval.is_empty() {
-                                    println!("{}", diags_digest.message);
-                                } else {
+                                if eval_mode {
                                     eprintln!("{}", diags_digest.message);
+                                } else {
+                                    println!("{}", diags_digest.message);
                                 }
                             }
                             if diags_digest.errors > 0 {
@@ -1200,9 +1196,7 @@ pub fn main() {
                         Terminal::new(settings)
                     }
                 };
-                let reload = if cmd.eval.is_empty() {
-                    terminal.start()
-                } else {
+                let reload = if eval_mode {
                     let mut reload = false;
                     for expression in expressions.by_ref() {
                         if expression == "::reload" {
@@ -1214,6 +1208,8 @@ pub fn main() {
                         }
                     }
                     reload
+                } else {
+                    terminal.start()
                 };
 
                 // Report telemetry
@@ -1251,7 +1247,7 @@ pub fn main() {
                 }
             }
 
-            if cmd.eval.is_empty() && clarinetrc.enable_hints.unwrap_or(true) {
+            if !eval_mode && clarinetrc.enable_hints.unwrap_or(true) {
                 display_contract_new_hint(None);
             }
         }

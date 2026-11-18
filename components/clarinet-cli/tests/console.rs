@@ -1,5 +1,6 @@
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
 
 fn mock_remote_node(network_id: u32, height: u32) -> mockito::ServerGuard {
     let mut server = mockito::Server::new();
@@ -72,6 +73,14 @@ fn run_console_command(args: &[&str], commands: &[&str]) -> Vec<String> {
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     // Skip the three console instruction lines.
     stdout_str.lines().skip(3).map(|s| s.to_string()).collect()
+}
+
+fn clarinet(dir: impl AsRef<Path>, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_clarinet"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap()
 }
 
 #[test]
@@ -169,19 +178,10 @@ fn eval_is_quiet_and_stops_on_the_first_error() {
 #[test]
 fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let clarinet = env!("CARGO_BIN_EXE_clarinet");
-    let output = Command::new(clarinet)
-        .args(["new", "counter-project", "--disable-telemetry"])
-        .current_dir(&temp_dir)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
+    let new_project = ["new", "counter-project", "--disable-telemetry"];
+    assert!(clarinet(&temp_dir, &new_project).status.success());
     let project = temp_dir.path().join("counter-project");
-    assert!(Command::new(clarinet)
-        .args(["contract", "new", "counter"])
-        .current_dir(&project)
-        .output()
-        .unwrap()
+    assert!(clarinet(&project, &["contract", "new", "counter"])
         .status
         .success());
     let manifest = project.join("Clarinet.toml");
@@ -200,8 +200,9 @@ fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
          (define-read-only (get-count) (var-get count))",
     )
     .unwrap();
-    let output = Command::new(clarinet)
-        .args([
+    let output = clarinet(
+        &project,
+        &[
             "console",
             "-e",
             "::set_tx_sender ST1SJ3DTE5DN7X54YDH5D64R3BCB6A2AG2ZQ8YPD5",
@@ -217,10 +218,8 @@ fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
             "::get_contracts",
             "-e",
             "::get_assets_maps",
-        ])
-        .current_dir(&project)
-        .output()
-        .unwrap();
+        ],
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
@@ -236,28 +235,16 @@ fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
 
     assert!(String::from_utf8_lossy(&output.stderr).contains("warning:"));
 
-    assert!(Command::new(clarinet)
-        .args(["deployments", "generate", "--simnet"])
-        .current_dir(&project)
-        .output()
-        .unwrap()
+    assert!(clarinet(&project, &["deployments", "generate", "--simnet"])
         .status
         .success());
-    assert!(Command::new(clarinet)
-        .args(["contract", "new", "other"])
-        .current_dir(&project)
-        .output()
-        .unwrap()
+    assert!(clarinet(&project, &["contract", "new", "other"])
         .status
         .success());
     let other = project.join("contracts/other.clar");
     let other_source = std::fs::read_to_string(&other).unwrap();
     std::fs::remove_file(&other).unwrap();
-    let output = Command::new(clarinet)
-        .args(["console", "-e", "(+ 1 1)"])
-        .current_dir(&project)
-        .output()
-        .unwrap();
+    let output = clarinet(&project, &["console", "-e", "(+ 1 1)"]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -265,11 +252,7 @@ fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
     assert!(stderr.contains("error:"), "{stderr}");
     std::fs::write(&other, other_source).unwrap();
 
-    let output = Command::new(clarinet)
-        .args(["console", "-e", "(+ 1 1)"])
-        .current_dir(&project)
-        .output()
-        .unwrap();
+    let output = clarinet(&project, &["console", "-e", "(+ 1 1)"]);
     assert!(
         output.status.success(),
         "{}",
@@ -279,11 +262,7 @@ fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
 
     // Startup errors must prevent evaluation.
     std::fs::write(&contract, "(define-read-only (get-count) missing)").unwrap();
-    let output = Command::new(clarinet)
-        .args(["console", "-e", "(+ 1 1)"])
-        .current_dir(&project)
-        .output()
-        .unwrap();
+    let output = clarinet(&project, &["console", "-e", "(+ 1 1)"]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("error:"));
@@ -306,11 +285,7 @@ fn eval_command_errors_stop_evaluation() {
         "::get_costs (+ 1 u1)",
         "::debug (+ 1 1)",
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_clarinet"))
-            .args(["console", "-e", command, "-e", "(+ 2 2)"])
-            .current_dir(&temp_dir)
-            .output()
-            .unwrap();
+        let output = clarinet(&temp_dir, &["console", "-e", command, "-e", "(+ 2 2)"]);
         assert!(!output.status.success(), "{command}");
         assert!(output.stdout.is_empty(), "{command}");
         assert!(!output.stderr.is_empty(), "{command}");
