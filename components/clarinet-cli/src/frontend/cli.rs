@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::prelude::*;
-use std::io::{self, IsTerminal};
+use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::{env, process};
 
@@ -473,7 +473,12 @@ struct ApplyDeployment {
 #[derive(Parser, PartialEq, Clone, Debug)]
 struct Console {
     /// Evaluate an expression and exit (repeatable)
-    #[clap(long = "eval", short = 'e', value_name = "expr")]
+    #[clap(
+        long = "eval",
+        short = 'e',
+        value_name = "expr",
+        allow_hyphen_values = true
+    )]
     pub eval: Vec<String>,
 
     /// Path to Clarinet.toml
@@ -585,10 +590,6 @@ struct Completions {
 }
 
 pub fn main() {
-    if !io::stdout().is_terminal() {
-        colored::control::set_override(false);
-    }
-
     let opts: Opts = match Opts::try_parse() {
         Ok(opts) => opts,
         Err(e) => {
@@ -882,7 +883,7 @@ pub fn main() {
                         Err(format!("{}: a flag `--devnet`, `--testnet`, `--mainnet` or `--deployment-plan-path=path/to/yaml` should be provided.", yellow!("Command usage")))
                     }
                     (Some(network), None) => {
-                        load_deployment_if_exists(&manifest, network, cmd.use_on_disk_deployment_plan, cmd.use_computed_deployment_plan).and_then(|opt| match opt {
+                        load_deployment_if_exists(&manifest, network, cmd.use_on_disk_deployment_plan, cmd.use_computed_deployment_plan, true).and_then(|opt| match opt {
                             Some(deployment) => {
                                 println!(
                                     "{} using existing deployments/default.{}-plan.yaml",
@@ -1151,8 +1152,8 @@ pub fn main() {
                             manifest,
                             &cmd.deployment_plan_path,
                             cmd.use_on_disk_deployment_plan,
-                            cmd.use_computed_deployment_plan
-                                || (eval_mode && !cmd.use_on_disk_deployment_plan),
+                            cmd.use_computed_deployment_plan,
+                            !eval_mode,
                             false,
                             Environment::Simnet,
                         );
@@ -1197,17 +1198,13 @@ pub fn main() {
                     }
                 };
                 let reload = if eval_mode {
-                    let mut reload = false;
-                    for expression in expressions.by_ref() {
-                        if expression == "::reload" {
-                            reload = true;
-                            break;
-                        }
-                        if terminal.eval(expression).is_err() {
-                            std::process::exit(1);
-                        }
-                    }
-                    reload
+                    let reload = expressions.any(|expression| {
+                        terminal
+                            .eval(expression)
+                            .unwrap_or_else(|_| std::process::exit(1))
+                    });
+                    // A `::reload` with nothing after it has no session to prepare.
+                    reload && expressions.len() > 0
                 } else {
                     terminal.start()
                 };
@@ -1401,6 +1398,7 @@ pub fn main() {
                         &cmd.deployment_plan_path,
                         cmd.use_on_disk_deployment_plan,
                         cmd.use_computed_deployment_plan,
+                        true,
                         true,
                         environment,
                     );
@@ -1755,6 +1753,7 @@ pub fn load_deployment_and_artifacts_or_exit(
     deployment_plan_path: &Option<String>,
     force_on_disk: bool,
     force_computed: bool,
+    can_prompt: bool,
     enable_analysis: bool,
     environment: Environment,
 ) -> (
@@ -1774,6 +1773,7 @@ pub fn load_deployment_and_artifacts_or_exit(
                 &StacksNetwork::Simnet,
                 force_on_disk,
                 force_computed,
+                can_prompt,
             )
             .map_err(|e| format!("loading {default_deployment_file} failed with error: {e}"))
             .and_then(|opt| match opt {
@@ -1800,6 +1800,7 @@ pub fn load_deployment_and_artifacts_or_exit(
                             environment,
                         )?;
                     found_env_simnet |= gen_found_env_simnet;
+                    note_if_plan_on_disk_differs(manifest, &deployment, default_deployment_file);
                     if ast_artifacts.success {
                         let mut artifacts = setup_session_with_deployment(
                             manifest,
@@ -1856,6 +1857,22 @@ pub fn load_deployment_and_artifacts_or_exit(
     )
 }
 
+/// Says so when a plan on disk was passed over for a computed one that differs.
+fn note_if_plan_on_disk_differs(
+    manifest: &ProjectManifest,
+    deployment: &DeploymentSpecification,
+    plan_file: &str,
+) {
+    let project_root = &manifest.root_dir;
+    let on_disk = paths::read_content(&project_root.join(plan_file));
+    if on_disk.is_ok_and(|on_disk| deployment.to_file_content(project_root).ok() != Some(on_disk)) {
+        eprintln!(
+            "{} {plan_file} differs from the computed plan and is ignored (use --use-on-disk-deployment-plan to apply it)",
+            yellow!("note:")
+        );
+    }
+}
+
 fn should_existing_plan_be_replaced(
     existing_plan: &DeploymentSpecification,
     new_plan: &DeploymentSpecification,
@@ -1906,10 +1923,16 @@ fn load_deployment_if_exists(
     network: &StacksNetwork,
     force_on_disk: bool,
     force_computed: bool,
+    can_prompt: bool,
 ) -> Result<Option<DeploymentSpecification>, String> {
     let project_root = &manifest.root_dir;
     let default_deployment_location = project_root.join(get_default_deployment_path(network));
     if !default_deployment_location.exists() {
+        return Ok(None);
+    }
+    // With no one to approve an overwrite, the file is left alone and the
+    // caller computes a plan.
+    if !(can_prompt || force_on_disk || force_computed) {
         return Ok(None);
     }
 
@@ -1963,7 +1986,6 @@ fn load_deployment_if_exists(
                     Ok(Some(deployment))
                 }
             }
-            Err(message) if force_computed => Err(message),
             Err(message) => {
                 eprintln!(
                     "{} unable to compute an updated plan\n{}",
@@ -2383,6 +2405,7 @@ fn devnet_start(cmd: DevnetStart, clarinetrc: ClarinetRC) {
             &StacksNetwork::Devnet,
             cmd.use_on_disk_deployment_plan,
             cmd.use_computed_deployment_plan,
+            true,
         )
         .and_then(|opt| match opt {
             Some(deployment) => {

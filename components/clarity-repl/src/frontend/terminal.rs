@@ -5,6 +5,7 @@ use rustyline::DefaultEditor;
 use crate::analysis::LintDiagnostic;
 use crate::repl::clarity_values::value_to_string;
 use crate::repl::diagnostic::output_diagnostic;
+use crate::repl::session::ConsoleInput;
 use crate::repl::settings::SessionSettings;
 use crate::repl::Session;
 
@@ -53,11 +54,13 @@ fn complete_input(str: &str) -> Result<Input, (char, char)> {
     }
 }
 
-/// Joins what a console command wrote to `output`, or the errors it returned.
+/// Joins what a console command wrote to `output`. When it failed, the errors
+/// it returned follow, so that a failed `::trace` keeps its trace.
 fn join_lines(result: Result<(), Vec<String>>, output: Vec<String>) -> Result<String, String> {
-    result
-        .map(|()| output.join("\n"))
-        .map_err(|errors| errors.join("\n"))
+    match result {
+        Ok(()) => Ok(output.join("\n")),
+        Err(errors) => Err([output, errors].concat().join("\n")),
+    }
 }
 
 pub struct Terminal {
@@ -80,32 +83,33 @@ impl Terminal {
         }
     }
 
-    pub fn eval(&mut self, input: &str) -> Result<(), String> {
+    /// Evaluates one `--eval` input: its result goes to stdout, its errors to
+    /// stderr. Returns whether the input asks for a reload of the session.
+    pub fn eval(&mut self, input: &str) -> Result<bool, String> {
         self.executed.push(input.to_string());
-        // `::toggle_timings` would put timings on stdout, among the results.
-        self.session.interpreter.repl_settings.show_timings = false;
         let mut output = vec![];
-        let result = if let Some(filename) = input.strip_prefix("::read ") {
-            std::fs::read_to_string(filename)
-                .map_err(|error| format!("unable to read {filename}: {error}"))
-                .and_then(|snippet| self.eval_snippet(&snippet))
-        } else if input.starts_with("::debug") {
-            Err("::debug requires an interactive console".into())
-        } else if input.starts_with("::trace") {
-            join_lines(self.session.trace(&mut output, input), output)
-        } else if input.starts_with("::perf") {
-            join_lines(self.session.perf(&mut output, input), output)
-        } else if input.starts_with("::get_costs") {
-            join_lines(self.session.get_costs(&mut output, input), output)
-        } else if input.starts_with("::") {
-            self.session.handle_command_result(input)
-        } else {
-            self.eval_snippet(input)
+        let result = match ConsoleInput::parse(input) {
+            ConsoleInput::Reload => return Ok(true),
+            ConsoleInput::Read(cmd) => {
+                Session::read_snippet_file(cmd).and_then(|snippet| self.eval_snippet(&snippet))
+            }
+            // The toggles would put costs and timings on stdout, among the results.
+            ConsoleInput::Debug(cmd) | ConsoleInput::Toggle(cmd) => {
+                let name = cmd.split_once(' ').map_or(cmd, |(name, _)| name);
+                Err(format!("{name} requires an interactive console"))
+            }
+            ConsoleInput::Trace(cmd) => join_lines(self.session.trace(&mut output, cmd), output),
+            ConsoleInput::Perf(cmd) => join_lines(self.session.perf(&mut output, cmd), output),
+            ConsoleInput::GetCosts(cmd) => {
+                join_lines(self.session.get_costs(&mut output, cmd), output)
+            }
+            ConsoleInput::Command(cmd) => self.session.handle_command_result(cmd),
+            ConsoleInput::Snippet(snippet) => self.eval_snippet(snippet),
         };
         match result {
             Ok(output) => {
                 println!("{output}");
-                Ok(())
+                Ok(false)
             }
             Err(error) => {
                 eprintln!("{error}");

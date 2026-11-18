@@ -48,7 +48,6 @@ fn run_console_command(args: &[&str], commands: &[&str]) -> Vec<String> {
         .current_dir(&temp_dir)
         // Rustyline prints prompts when TERM identifies an unsupported terminal.
         .env("TERM", "xterm-256color")
-        .env("CLICOLOR_FORCE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -141,8 +140,9 @@ fn eval_is_quiet_and_stops_on_the_first_error() {
     let temp_dir = tempfile::tempdir().unwrap();
     for (args, stdout, success, error) in [
         (vec!["-e", "(+ 1 1)"], "2\n", true, ""),
+        (vec!["-e", "-1"], "-1\n", true, ""),
         (
-            vec!["-e", "(+ 1 1)", "-e", "::reload", "-e", "(+ 2 2)"],
+            vec!["-e", "(+ 1 1)", "-e", "::reload ", "-e", "(+ 2 2)"],
             "2\n4\n",
             true,
             "",
@@ -160,19 +160,21 @@ fn eval_is_quiet_and_stops_on_the_first_error() {
             "error:",
         ),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_clarinet"))
-            .arg("console")
-            .args(args)
-            .env("CLICOLOR_FORCE", "1")
-            .current_dir(&temp_dir)
-            .output()
-            .unwrap();
+        let output = clarinet(&temp_dir, &[vec!["console"], args].concat());
         assert_eq!(String::from_utf8_lossy(&output.stdout), stdout);
         assert_eq!(output.status.success(), success);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(error), "{stderr}");
         assert!(!stderr.contains('\u{1b}'));
     }
+
+    let forced_colours = Command::new(env!("CARGO_BIN_EXE_clarinet"))
+        .args(["console", "-e", "::set_epoch 3.1"])
+        .env("CLICOLOR_FORCE", "1")
+        .current_dir(&temp_dir)
+        .output()
+        .unwrap();
+    assert!(forced_colours.stdout.contains(&0x1b));
 }
 
 #[test]
@@ -233,11 +235,21 @@ fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
     assert!(!stdout.contains("CTRL-D"));
     assert!(!stdout.contains('\u{1b}'));
 
-    assert!(String::from_utf8_lossy(&output.stderr).contains("warning:"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let warnings = stderr.matches("warning:").count();
+    assert!(warnings > 0, "{stderr}");
+
+    // A trailing `::reload` does not load the project a second time.
+    let output = clarinet(&project, &["console", "-e", "(+ 1 1)", "-e", "::reload"]);
+    assert_eq!(output.stdout, b"2\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("warning:").count(), warnings, "{stderr}");
 
     assert!(clarinet(&project, &["deployments", "generate", "--simnet"])
         .status
         .success());
+    let plan = project.join("deployments/default.simnet-plan.yaml");
+    let plan_on_disk = std::fs::read(&plan).unwrap();
     assert!(clarinet(&project, &["contract", "new", "other"])
         .status
         .success());
@@ -259,6 +271,9 @@ fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"2\n");
+    // The plan on disk is now out of date: it is reported, not rewritten.
+    assert!(String::from_utf8_lossy(&output.stderr).contains("differs from the computed plan"));
+    assert_eq!(std::fs::read(&plan).unwrap(), plan_on_disk);
 
     // Startup errors must prevent evaluation.
     std::fs::write(&contract, "(define-read-only (get-count) missing)").unwrap();
@@ -278,6 +293,8 @@ fn eval_command_errors_stop_evaluation() {
         "::unknown",
         "::reload_typo",
         "::read missing.clar",
+        "::toggle_costs",
+        "::toggle_timings",
         "::encode (+ 1 u1)",
         "::decode invalid",
         "::trace (+ 1 u1)",
@@ -290,4 +307,16 @@ fn eval_command_errors_stop_evaluation() {
         assert!(output.stdout.is_empty(), "{command}");
         assert!(!output.stderr.is_empty(), "{command}");
     }
+
+    let output = clarinet(&temp_dir, &["console", "-e", "::read"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: ::read"));
+
+    // A failed `::trace` still shows what ran before the failure.
+    let trace = "::trace (begin (print u1) (unwrap-panic (if true none (some u1))))";
+    let output = clarinet(&temp_dir, &["console", "-e", trace]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("<console>"), "{stderr}");
+    assert!(stderr.contains("error:"), "{stderr}");
 }

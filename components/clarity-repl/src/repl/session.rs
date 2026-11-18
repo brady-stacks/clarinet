@@ -288,6 +288,39 @@ impl SessionHooks {
     }
 }
 
+/// A console input and the command that handles it, so that the interactive
+/// console and `--eval` recognise the same commands.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum ConsoleInput<'a> {
+    Reload,
+    Read(&'a str),
+    Debug(&'a str),
+    Trace(&'a str),
+    Perf(&'a str),
+    GetCosts(&'a str),
+    /// `::toggle_costs` and `::toggle_timings`, which only change what later inputs display.
+    Toggle(&'a str),
+    Command(&'a str),
+    Snippet(&'a str),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> ConsoleInput<'a> {
+    pub(crate) fn parse(input: &'a str) -> Self {
+        match input {
+            cmd if cmd.trim_end() == "::reload" => Self::Reload,
+            cmd if cmd.starts_with("::read") => Self::Read(cmd),
+            cmd if cmd.starts_with("::debug") => Self::Debug(cmd),
+            cmd if cmd.starts_with("::trace") => Self::Trace(cmd),
+            cmd if cmd.starts_with("::perf") => Self::Perf(cmd),
+            cmd if cmd.starts_with("::get_costs") => Self::GetCosts(cmd),
+            cmd if cmd.starts_with("::toggle_") => Self::Toggle(cmd),
+            cmd if cmd.starts_with("::") => Self::Command(cmd),
+            snippet => Self::Snippet(snippet),
+        }
+    }
+}
+
 impl Session {
     pub fn new(settings: SessionSettings) -> Self {
         Self::inner_new(settings, true)
@@ -370,39 +403,30 @@ impl Session {
         let mut output = Vec::<String>::new();
 
         let mut reload = false;
-        match command {
-            #[cfg(not(target_arch = "wasm32"))]
-            cmd if cmd.starts_with("::reload") => reload = true,
-            #[cfg(not(target_arch = "wasm32"))]
-            cmd if cmd.starts_with("::read") => self.read(&mut output, cmd),
-            #[cfg(not(target_arch = "wasm32"))]
-            cmd if cmd.starts_with("::debug") => self.debug(&mut output, cmd),
-            #[cfg(not(target_arch = "wasm32"))]
-            cmd if cmd.starts_with("::trace") => {
+        match ConsoleInput::parse(command) {
+            ConsoleInput::Reload => reload = true,
+            ConsoleInput::Read(cmd) => self.read(&mut output, cmd),
+            ConsoleInput::Debug(cmd) => self.debug(&mut output, cmd),
+            ConsoleInput::Trace(cmd) => {
                 if let Err(errors) = self.trace(&mut output, cmd) {
                     output.extend(errors);
                 }
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            cmd if cmd.starts_with("::perf") => {
+            ConsoleInput::Perf(cmd) => {
                 if let Err(errors) = self.perf(&mut output, cmd) {
                     output.extend(errors);
                 }
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            cmd if cmd.starts_with("::get_costs") => {
+            ConsoleInput::GetCosts(cmd) => {
                 if let Err(errors) = self.get_costs(&mut output, cmd) {
                     output.extend(errors);
                 }
             }
-
-            cmd if cmd.starts_with("::") => {
+            ConsoleInput::Toggle(cmd) | ConsoleInput::Command(cmd) => {
                 output.push(self.handle_command(cmd));
             }
-
-            snippet => {
+            ConsoleInput::Snippet(snippet) => {
                 let _ = self.run_snippet(&mut output, self.show_costs, snippet);
-                return (false, output);
             }
         }
 
@@ -732,20 +756,25 @@ impl Session {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read(&mut self, output: &mut Vec<String>, cmd: &str) {
-        let Some((_, filename)) = cmd.split_once(' ') else {
-            return output.push("Usage: ::read <filename>".red().to_string());
-        };
-
-        match std::fs::read_to_string(filename) {
+        match Self::read_snippet_file(cmd) {
             Ok(snippet) => {
                 let _ = self.run_snippet(output, self.show_costs, &snippet);
             }
-            Err(err) => output.push(
-                format!("unable to read {filename}: {err}")
-                    .red()
-                    .to_string(),
-            ),
+            Err(error) => output.push(error),
+        }
+    }
+
+    /// Reads the snippet a `::read <filename>` command points to.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_snippet_file(cmd: &str) -> Result<String, String> {
+        let Some((_, filename)) = cmd.split_once(' ') else {
+            return Err("Usage: ::read <filename>".red().to_string());
         };
+        std::fs::read_to_string(filename).map_err(|err| {
+            format!("unable to read {filename}: {err}")
+                .red()
+                .to_string()
+        })
     }
 
     pub fn stx_transfer(

@@ -20,6 +20,7 @@ fn test_session_with_testnet_accounts() {
         &None,
         false,
         true,
+        true,
         false,
         Environment::Simnet,
     );
@@ -40,6 +41,7 @@ fn test_session_with_mainnet_accounts() {
         &manifest,
         &None,
         false,
+        true,
         true,
         false,
         Environment::Simnet,
