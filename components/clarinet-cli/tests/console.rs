@@ -293,6 +293,8 @@ fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
 #[test]
 fn eval_command_errors_stop_evaluation() {
     let temp_dir = tempfile::tempdir().unwrap();
+    // What a run without errors writes to stderr outside a project.
+    let quiet_stderr = clarinet(&temp_dir, &["console", "-e", "(+ 2 2)"]).stderr;
     for command in [
         "::set_tx_sender invalid",
         "::advance_chain_tip invalid",
@@ -312,7 +314,7 @@ fn eval_command_errors_stop_evaluation() {
         let output = clarinet(&temp_dir, &["console", "-e", command, "-e", "(+ 2 2)"]);
         assert!(!output.status.success(), "{command}");
         assert!(output.stdout.is_empty(), "{command}");
-        assert!(!output.stderr.is_empty(), "{command}");
+        assert!(output.stderr.len() > quiet_stderr.len(), "{command}");
     }
 
     let output = clarinet(&temp_dir, &["console", "-e", "::read"]);

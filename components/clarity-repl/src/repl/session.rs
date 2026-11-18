@@ -305,8 +305,8 @@ pub(crate) enum ConsoleInput<'a> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<'a> ConsoleInput<'a> {
-    pub(crate) fn parse(input: &'a str) -> Self {
+impl<'a> From<&'a str> for ConsoleInput<'a> {
+    fn from(input: &'a str) -> Self {
         match input {
             cmd if cmd.trim_end() == "::reload" => Self::Reload,
             cmd if cmd.starts_with("::read") => Self::Read(cmd),
@@ -403,7 +403,7 @@ impl Session {
         let mut output = Vec::<String>::new();
 
         let mut reload = false;
-        match ConsoleInput::parse(command) {
+        match ConsoleInput::from(command) {
             ConsoleInput::Reload => reload = true,
             ConsoleInput::Read(cmd) => self.read(&mut output, cmd),
             ConsoleInput::Debug(cmd) => self.debug(&mut output, cmd),

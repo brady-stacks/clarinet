@@ -88,7 +88,7 @@ impl Terminal {
     pub fn eval(&mut self, input: &str) -> Result<bool, String> {
         self.executed.push(input.to_string());
         let mut output = vec![];
-        let result = match ConsoleInput::parse(input) {
+        let result = match ConsoleInput::from(input) {
             ConsoleInput::Reload => return Ok(true),
             ConsoleInput::Read(cmd) => {
                 Session::read_snippet_file(cmd).and_then(|snippet| self.eval_snippet(&snippet))
