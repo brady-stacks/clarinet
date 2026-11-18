@@ -20,7 +20,7 @@ use comfy_table::Table;
 use serde::Serialize;
 use stacks_common::bounded_format;
 
-use super::diagnostic::output_diagnostic;
+use super::diagnostic::{output_diagnostic, output_diagnostics};
 use super::hooks::logger::LoggerHook;
 use super::hooks::perf::{CostField, PerfHook};
 use super::interpreter::{ContractCallError, ExecutionError, NonceCharge, TransactionTerms};
@@ -408,19 +408,16 @@ impl Session {
             ConsoleInput::Read(cmd) => self.read(&mut output, cmd),
             ConsoleInput::Debug(cmd) => self.debug(&mut output, cmd),
             ConsoleInput::Trace(cmd) => {
-                if let Err(errors) = self.trace(&mut output, cmd) {
-                    output.extend(errors);
-                }
+                let result = self.trace(&mut output, cmd);
+                output.extend(result.err().unwrap_or_default());
             }
             ConsoleInput::Perf(cmd) => {
-                if let Err(errors) = self.perf(&mut output, cmd) {
-                    output.extend(errors);
-                }
+                let result = self.perf(&mut output, cmd);
+                output.extend(result.err().unwrap_or_default());
             }
             ConsoleInput::GetCosts(cmd) => {
-                if let Err(errors) = self.get_costs(&mut output, cmd) {
-                    output.extend(errors);
-                }
+                let result = self.get_costs(&mut output, cmd);
+                output.extend(result.err().unwrap_or_default());
             }
             ConsoleInput::Toggle(cmd) | ConsoleInput::Command(cmd) => {
                 output.push(self.handle_command(cmd));
@@ -703,15 +700,7 @@ impl Session {
 
         let result = self
             .eval_with_hooks(snippet.to_string(), Some(vec![&mut tracer]), false)
-            .map_err(|diagnostics| {
-                let formatted_lines = snippet.lines().map(String::from).collect::<Vec<_>>();
-                diagnostics
-                    .iter()
-                    .flat_map(|diagnostic| {
-                        output_diagnostic(diagnostic, "<snippet>", &formatted_lines)
-                    })
-                    .collect()
-            });
+            .map_err(|diagnostics| output_diagnostics(&diagnostics, "<snippet>", snippet));
         output.push(format!("{snippet}  {}", black!("<console>")));
         output.push(tracer.output.join("\n"));
         result.map(|_| ())
@@ -734,15 +723,7 @@ impl Session {
         let mut perf = PerfHook::new(cost_field);
 
         self.eval_with_hooks(snippet.to_string(), Some(vec![&mut perf]), true)
-            .map_err(|diagnostics| {
-                let formatted_lines = snippet.lines().map(String::from).collect::<Vec<_>>();
-                diagnostics
-                    .iter()
-                    .flat_map(|diagnostic| {
-                        output_diagnostic(diagnostic, "<snippet>", &formatted_lines)
-                    })
-                    .collect::<Vec<_>>()
-            })?;
+            .map_err(|diagnostics| output_diagnostics(&diagnostics, "<snippet>", &snippet))?;
         output.push(
             format!(
                 "Performance data written to perf.data (tracking {})",
@@ -1657,11 +1638,7 @@ impl Session {
                 Ok(s.green().to_string())
             }
             Err(diagnostics) => {
-                let lines: Vec<String> = snippet.split('\n').map(String::from).collect();
-                let mut output: Vec<String> = diagnostics
-                    .into_iter()
-                    .flat_map(|d| output_diagnostic(&d, "encode", &lines))
-                    .collect();
+                let mut output = output_diagnostics(&diagnostics, "encode", snippet);
                 output.push("encoding failed".into());
                 Err(output.join("\n"))
             }

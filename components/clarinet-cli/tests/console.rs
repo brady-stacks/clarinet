@@ -281,6 +281,13 @@ fn eval_uses_one_project_session_and_routes_startup_diagnostics() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("error:"));
+
+    // The interactive console still reports them on stdout.
+    let output = clarinet(&project, &["console", "--use-on-disk-deployment-plan"]);
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("error:"), "{stdout}");
+    assert!(stdout.contains("detected"), "{stdout}");
 }
 
 #[test]

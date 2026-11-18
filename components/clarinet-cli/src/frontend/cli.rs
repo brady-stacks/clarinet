@@ -1164,19 +1164,23 @@ pub fn main() {
                                 &artifacts.lint_diags,
                                 &deployment,
                             );
-                            if diags_digest.has_feedbacks() {
+                            // `--eval` keeps stdout for the results.
+                            let report = |message: &str| {
                                 if eval_mode {
-                                    eprintln!("{}", diags_digest.message);
+                                    eprintln!("{message}");
                                 } else {
-                                    println!("{}", diags_digest.message);
+                                    println!("{message}");
                                 }
+                            };
+                            if diags_digest.has_feedbacks() {
+                                report(&diags_digest.message);
                             }
                             if diags_digest.errors > 0 {
-                                eprintln!(
+                                report(&format!(
                                     "{} {} detected",
                                     red!("x"),
                                     pluralize!(diags_digest.errors, "error")
-                                );
+                                ));
                             }
                             if !artifacts.success {
                                 std::process::exit(1);
@@ -1209,9 +1213,10 @@ pub fn main() {
                     terminal.start()
                 };
 
-                // Report telemetry
+                // Report telemetry. A one-shot run is not a console session, and
+                // the request would hold up every call.
                 if let Some(manifest) = manifest {
-                    if manifest.project.telemetry {
+                    if manifest.project.telemetry && !eval_mode {
                         #[cfg(feature = "telemetry")]
                         telemetry_report_event(DeveloperUsageEvent::PokeExecuted(
                             DeveloperUsageDigest::new(

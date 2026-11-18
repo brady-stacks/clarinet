@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use clarity::vm::diagnostic::{Diagnostic, Level};
 
 use crate::analysis::linter::LintName;
@@ -21,6 +23,19 @@ pub fn level_to_string(level: &Level, lint_name: Option<&LintName>) -> String {
         }
         None => format!("{level_str}:"),
     }
+}
+
+/// Formats each diagnostic against the snippet it points into.
+pub fn output_diagnostics(
+    diagnostics: impl IntoIterator<Item = impl Borrow<LintDiagnostic>>,
+    name: &str,
+    snippet: &str,
+) -> Vec<String> {
+    let lines = snippet.lines().map(String::from).collect::<Vec<_>>();
+    diagnostics
+        .into_iter()
+        .flat_map(|diagnostic| output_diagnostic(diagnostic.borrow(), name, &lines))
+        .collect()
 }
 
 // Generate the formatted output for this diagnostic, given the source code.

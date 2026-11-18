@@ -4,7 +4,7 @@ use rustyline::DefaultEditor;
 
 use crate::analysis::LintDiagnostic;
 use crate::repl::clarity_values::value_to_string;
-use crate::repl::diagnostic::output_diagnostic;
+use crate::repl::diagnostic::output_diagnostics;
 use crate::repl::session::ConsoleInput;
 use crate::repl::settings::SessionSettings;
 use crate::repl::Session;
@@ -120,25 +120,20 @@ impl Terminal {
 
     fn eval_snippet(&mut self, snippet: &str) -> Result<String, String> {
         let snippet = self.session.remap_user_snippet(snippet.to_string());
-        let lines = snippet.lines().map(String::from).collect::<Vec<_>>();
-        let render = |diagnostic: &LintDiagnostic| {
-            output_diagnostic(diagnostic, "<stdin>", &lines).join("\n")
-        };
-        let result = self.session.eval(snippet, false).map_err(|diagnostics| {
-            diagnostics
-                .iter()
-                .map(render)
-                .collect::<Vec<_>>()
-                .join("\n")
-        })?;
-        for diagnostic in result
+        let result = self
+            .session
+            .eval(snippet.clone(), false)
+            .map_err(|diagnostics| {
+                output_diagnostics(&diagnostics, "<stdin>", &snippet).join("\n")
+            })?;
+        let warnings = result
             .diagnostics
             .iter()
             .cloned()
             .map(LintDiagnostic::from)
-            .chain(result.lint_diagnostics.iter().cloned())
-        {
-            eprintln!("{}", render(&diagnostic));
+            .chain(result.lint_diagnostics.iter().cloned());
+        for line in output_diagnostics(warnings, "<stdin>", &snippet) {
+            eprintln!("{line}");
         }
         Ok(match result.into_inner().result {
             EvaluationResult::Contract(contract) => contract
