@@ -883,7 +883,7 @@ pub fn main() {
                         Err(format!("{}: a flag `--devnet`, `--testnet`, `--mainnet` or `--deployment-plan-path=path/to/yaml` should be provided.", yellow!("Command usage")))
                     }
                     (Some(network), None) => {
-                        load_deployment_if_exists(&manifest, network, cmd.use_on_disk_deployment_plan, cmd.use_computed_deployment_plan, true).and_then(|opt| match opt {
+                        load_deployment_if_exists(&manifest, network, PlanOnDisk::from_flags(cmd.use_on_disk_deployment_plan, cmd.use_computed_deployment_plan)).and_then(|opt| match opt {
                             Some(deployment) => {
                                 println!(
                                     "{} using existing deployments/default.{}-plan.yaml",
@@ -1148,12 +1148,18 @@ pub fn main() {
 
                 let mut terminal = match manifest {
                     Some(ref manifest) => {
+                        let plan_on_disk = match PlanOnDisk::from_flags(
+                            cmd.use_on_disk_deployment_plan,
+                            cmd.use_computed_deployment_plan,
+                        ) {
+                            // `--eval` has no one to ask.
+                            PlanOnDisk::AskToOverwrite if eval_mode => PlanOnDisk::Ignore,
+                            plan_on_disk => plan_on_disk,
+                        };
                         let ((deployment, _, artifacts), _) = load_deployment_and_artifacts_or_exit(
                             manifest,
                             &cmd.deployment_plan_path,
-                            cmd.use_on_disk_deployment_plan,
-                            cmd.use_computed_deployment_plan,
-                            !eval_mode,
+                            plan_on_disk,
                             false,
                             Environment::Simnet,
                         );
@@ -1401,9 +1407,10 @@ pub fn main() {
                     load_deployment_and_artifacts_or_exit(
                         &manifest,
                         &cmd.deployment_plan_path,
-                        cmd.use_on_disk_deployment_plan,
-                        cmd.use_computed_deployment_plan,
-                        true,
+                        PlanOnDisk::from_flags(
+                            cmd.use_on_disk_deployment_plan,
+                            cmd.use_computed_deployment_plan,
+                        ),
                         true,
                         environment,
                     );
@@ -1753,12 +1760,35 @@ fn load_manifest_or_warn(path: Option<String>) -> Option<ProjectManifest> {
         .ok()
 }
 
+/// What to do with the default deployment plan found on disk.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PlanOnDisk {
+    /// Compute a plan and, if it differs, ask before overwriting the file.
+    AskToOverwrite,
+    /// Use the file as it is.
+    Use,
+    /// Compute a plan and overwrite the file if it differs.
+    Overwrite,
+    /// Compute a plan and leave the file alone.
+    Ignore,
+}
+
+impl PlanOnDisk {
+    /// Reads the `--use-on-disk-deployment-plan` and
+    /// `--use-computed-deployment-plan` flags, which exclude each other.
+    fn from_flags(use_on_disk: bool, use_computed: bool) -> Self {
+        match (use_on_disk, use_computed) {
+            (true, _) => Self::Use,
+            (_, true) => Self::Overwrite,
+            _ => Self::AskToOverwrite,
+        }
+    }
+}
+
 pub fn load_deployment_and_artifacts_or_exit(
     manifest: &ProjectManifest,
     deployment_plan_path: &Option<String>,
-    force_on_disk: bool,
-    force_computed: bool,
-    can_prompt: bool,
+    plan_on_disk: PlanOnDisk,
     enable_analysis: bool,
     environment: Environment,
 ) -> (
@@ -1773,15 +1803,9 @@ pub fn load_deployment_and_artifacts_or_exit(
     let mut found_env_simnet = false;
     let result = match deployment_plan_path {
         None => {
-            load_deployment_if_exists(
-                manifest,
-                &StacksNetwork::Simnet,
-                force_on_disk,
-                force_computed,
-                can_prompt,
-            )
-            .map_err(|e| format!("loading {default_deployment_file} failed with error: {e}"))
-            .and_then(|opt| match opt {
+            let on_disk = load_deployment_if_exists(manifest, &StacksNetwork::Simnet, plan_on_disk)
+                .map_err(|e| format!("loading {default_deployment_file} failed with error: {e}"));
+            on_disk.and_then(|opt| match opt {
                 Some(mut deployment) => {
                     eprintln!("{} using {default_deployment_file}", yellow!("note:"));
                     if environment == Environment::OnChain {
@@ -1926,22 +1950,15 @@ fn should_existing_plan_be_replaced(
 fn load_deployment_if_exists(
     manifest: &ProjectManifest,
     network: &StacksNetwork,
-    force_on_disk: bool,
-    force_computed: bool,
-    can_prompt: bool,
+    plan_on_disk: PlanOnDisk,
 ) -> Result<Option<DeploymentSpecification>, String> {
     let project_root = &manifest.root_dir;
     let default_deployment_location = project_root.join(get_default_deployment_path(network));
-    if !default_deployment_location.exists() {
-        return Ok(None);
-    }
-    // With no one to approve an overwrite, the file is left alone and the
-    // caller computes a plan.
-    if !(can_prompt || force_on_disk || force_computed) {
+    if !default_deployment_location.exists() || plan_on_disk == PlanOnDisk::Ignore {
         return Ok(None);
     }
 
-    if !force_on_disk {
+    if plan_on_disk != PlanOnDisk::Use {
         match generate_default_deployment(manifest, network, true, network.deployment_environment())
         {
             Ok((deployment, _, _)) => {
@@ -1956,7 +1973,7 @@ fn load_deployment_if_exists(
                     return load_deployment(project_root, &default_deployment_location).map(Some);
                 }
 
-                if !force_computed {
+                if plan_on_disk == PlanOnDisk::AskToOverwrite {
                     println!("{}", blue!("A new deployment plan was computed and differs from the default deployment plan currently saved on disk:"));
 
                     let diffs = TextDiff::from_lines(
@@ -2408,9 +2425,10 @@ fn devnet_start(cmd: DevnetStart, clarinetrc: ClarinetRC) {
         None => load_deployment_if_exists(
             &manifest,
             &StacksNetwork::Devnet,
-            cmd.use_on_disk_deployment_plan,
-            cmd.use_computed_deployment_plan,
-            true,
+            PlanOnDisk::from_flags(
+                cmd.use_on_disk_deployment_plan,
+                cmd.use_computed_deployment_plan,
+            ),
         )
         .and_then(|opt| match opt {
             Some(deployment) => {
